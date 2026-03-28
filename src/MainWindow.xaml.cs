@@ -43,6 +43,9 @@ namespace UGTLive
         // DWM API for getting actual window bounds without shadows
         [DllImport("dwmapi.dll")]
         private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmFlush();
         
         private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
         
@@ -118,6 +121,9 @@ namespace UGTLive
         private Rect _restoreBoundsBeforeMaximize;
         private bool _isSnapshotOverlayDisplayed = false;
         private bool _snapshotInProgress = false;
+        private DateTime _blockHotkeyHideUntil = DateTime.MinValue;
+        private DispatcherTimer? _startupVisibilityGuardTimer;
+        private int _startupVisibilityGuardTicksRemaining = 0;
         private bool _logCaptureRectOnce = false; // Debug flag for capture rect logging
         private DispatcherTimer _captureTimer;
         private string outputPath = DEFAULT_OUTPUT_PATH;
@@ -334,6 +340,14 @@ namespace UGTLive
                 {
                     SetStatus("Using docTR");
                 }
+                else if (method == "Florence2")
+                {
+                    SetStatus("Using Florence2");
+                }
+                else if (method == "Generic LLM OCR")
+                {
+                    SetStatus("Using Generic LLM OCR");
+                }
                 else
                 {
                     SetStatus("Using EasyOCR");
@@ -362,6 +376,14 @@ namespace UGTLive
                 else if (method == "docTR")
                 {
                     SetStatus("Using docTR");
+                }
+                else if (method == "Florence2")
+                {
+                    SetStatus("Using Florence2");
+                }
+                else if (method == "Generic LLM OCR")
+                {
+                    SetStatus("Using Generic LLM OCR");
                 }
                 else
                 {
@@ -590,6 +612,9 @@ namespace UGTLive
                 
                 // Also try to find popup windows via interop
                 // WPF tooltips are displayed in Popup windows which are top-level HWND windows
+                // IMPORTANT: We must NOT apply WDA_EXCLUDEFROMCAPTURE to the MainWindow's own HWND
+                // because that would make the entire capture frame invisible on screen.
+                IntPtr mainWindowHwnd = new WindowInteropHelper(this).Handle;
                 var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
                 foreach (System.Diagnostics.ProcessThread thread in currentProcess.Threads)
                 {
@@ -597,12 +622,16 @@ namespace UGTLive
                     {
                         EnumThreadWindows((uint)thread.Id, (hWnd, lParam) =>
                         {
+                            // Skip the MainWindow HWND to avoid hiding the capture frame
+                            if (hWnd == mainWindowHwnd)
+                                return true;
+                            
                             var className = new StringBuilder(256);
                             GetClassName(hWnd, className, className.Capacity);
                             string cls = className.ToString();
                             
-                            // WPF tooltip windows typically have these class names
-                            if (cls.Contains("Popup") || cls.Contains("ToolTip") || cls.Contains("HwndWrapper"))
+                            // Only target actual popup/tooltip windows, not all HwndWrapper windows
+                            if (cls.Contains("Popup") || cls.Contains("ToolTip"))
                             {
                                 SetWindowDisplayAffinity(hWnd, WDA_EXCLUDEFROMCAPTURE);
                             }
@@ -630,6 +659,14 @@ namespace UGTLive
        
         private void ToggleMainWindowVisibility()
         {
+            // Startup guard: ignore early hotkey hide requests that can be accidentally
+            // triggered while focus/input is still stabilizing after startup dialogs close.
+            if (DateTime.Now < _blockHotkeyHideUntil && MainBorder.Visibility == Visibility.Visible)
+            {
+                Console.WriteLine("Ignored early toggle_main_window hotkey during startup guard window.");
+                return;
+            }
+
             HandleHideButton();
         }
         
@@ -990,13 +1027,142 @@ namespace UGTLive
                     break;
             }
             
-            // Set initial mouse passthrough state (always unchecked at startup to avoid confusion)
-            bool mousePassthrough = false;
+            // Restore the passthrough state from config so startup does not unexpectedly trap clicks.
+            bool mousePassthrough = ConfigManager.Instance.GetMainWindowMousePassthrough();
             mousePassthroughCheckBox.IsChecked = mousePassthrough;
-            // CRITICAL: Save to config BEFORE async WebView2 initialization reads it
-            ConfigManager.Instance.SetMainWindowMousePassthrough(mousePassthrough);
             updateMousePassthrough(mousePassthrough);
-            Console.WriteLine($"MainWindow mouse passthrough initialized: {(mousePassthrough ? "enabled" : "disabled")}");
+            Console.WriteLine($"MainWindow mouse passthrough restored: {(mousePassthrough ? "enabled" : "disabled")}");
+        }
+
+        /// <summary>
+        /// Enables passthrough as a startup safety net so a transparent topmost overlay
+        /// never blocks clicks immediately after leaving the GPU setup dialog.
+        /// </summary>
+        public void EnableStartupSafePassthrough()
+        {
+            ConfigManager.Instance.SetMainWindowMousePassthrough(true);
+            updateMousePassthrough(true);
+
+            if (mousePassthroughCheckBox != null)
+            {
+                mousePassthroughCheckBox.IsChecked = true;
+            }
+
+            Console.WriteLine("Startup safety: mouse passthrough enabled.");
+        }
+
+        /// <summary>
+        /// Ensures the capture frame is visible and reachable after startup.
+        /// This recovers from hidden/minimized/off-screen states that make the frame hard to find.
+        /// </summary>
+        public void EnsureCaptureFrameVisibleOnStartup()
+        {
+            if (WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+            }
+
+            // Extremely small sizes can make the frame effectively invisible.
+            if (double.IsNaN(Width) || Width < 120)
+            {
+                Width = DEFAULT_WINDOW_WIDTH;
+            }
+
+            if (double.IsNaN(Height) || Height < 120)
+            {
+                Height = DEFAULT_WINDOW_HEIGHT;
+            }
+
+            if (MainBorder != null && MainBorder.Visibility != Visibility.Visible)
+            {
+                MainBorder.Visibility = Visibility.Visible;
+
+                if (hideButton != null)
+                {
+                    hideButton.Content = "Hide red border";
+                    hideButton.Background = new SolidColorBrush(Color.FromRgb(95, 95, 95));
+                }
+            }
+
+            ensureWindowOnScreen();
+            BringToFront();
+            Activate();
+
+            // Block hotkey-based hide for a short period to prevent accidental startup collapse.
+            _blockHotkeyHideUntil = DateTime.Now.AddSeconds(20);
+            StartStartupVisibilityGuard();
+
+            Console.WriteLine($"Startup safety: capture frame visible at L={Left:F0}, T={Top:F0}, W={Width:F0}, H={Height:F0}");
+        }
+
+        private void StartStartupVisibilityGuard()
+        {
+            _startupVisibilityGuardTicksRemaining = 30;
+
+            if (_startupVisibilityGuardTimer == null)
+            {
+                _startupVisibilityGuardTimer = new DispatcherTimer();
+                _startupVisibilityGuardTimer.Interval = TimeSpan.FromSeconds(1);
+                _startupVisibilityGuardTimer.Tick += StartupVisibilityGuardTimer_Tick;
+            }
+
+            if (!_startupVisibilityGuardTimer.IsEnabled)
+            {
+                _startupVisibilityGuardTimer.Start();
+            }
+        }
+
+        private void StartupVisibilityGuardTimer_Tick(object? sender, EventArgs e)
+        {
+            if (MainBorder != null && MainBorder.Visibility != Visibility.Visible)
+            {
+                MainBorder.Visibility = Visibility.Visible;
+
+                if (hideButton != null)
+                {
+                    hideButton.Content = "Hide red border";
+                    hideButton.Background = new SolidColorBrush(Color.FromRgb(95, 95, 95));
+                }
+
+                Console.WriteLine("Startup guard restored hidden capture frame.");
+            }
+
+            CleanupDuplicateToolbars();
+
+            _startupVisibilityGuardTicksRemaining--;
+            if (_startupVisibilityGuardTicksRemaining <= 0)
+            {
+                _startupVisibilityGuardTimer?.Stop();
+            }
+        }
+
+        private void CleanupDuplicateToolbars()
+        {
+            var toolbars = System.Windows.Application.Current.Windows.OfType<ToolbarWindow>().ToList();
+            if (toolbars.Count <= 1)
+            {
+                return;
+            }
+
+            ToolbarWindow keep = _toolbarWindow ?? ToolbarWindow.Instance ?? toolbars[0];
+
+            foreach (var toolbar in toolbars)
+            {
+                if (toolbar != keep)
+                {
+                    try
+                    {
+                        toolbar.Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error closing duplicate toolbar: {ex.Message}");
+                    }
+                }
+            }
+
+            _toolbarWindow = keep;
+            Console.WriteLine("Startup guard removed duplicate toolbar windows.");
         }
         
         // Handler for application-level keyboard shortcuts
@@ -1519,30 +1685,10 @@ namespace UGTLive
             // Create bitmap with window dimensions
             using (Bitmap bitmap = new Bitmap(captureRect.Width, captureRect.Height))
             {
-                // Use direct GDI capture with the overlay hidden
-                using (Graphics g = Graphics.FromImage(bitmap))
+                if (!TryCopyCaptureRectToBitmap(bitmap, suppressMainWindowOverlay: true, errorContext: "snapshot capture"))
                 {
-                    // Configure for speed and quality
-                    g.CompositingQuality = CompositingQuality.HighSpeed;
-                    g.SmoothingMode = SmoothingMode.HighSpeed;
-                    g.InterpolationMode = InterpolationMode.Low;
-                    g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
-                   
-                    try
-                    {
-                        g.CopyFromScreen(
-                            captureRect.Left,
-                            captureRect.Top,
-                            0, 0,
-                            bitmap.Size,
-                            CopyPixelOperation.SourceCopy);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error during snapshot capture: {ex.Message}");
-                        OnSnapshotComplete(false);
-                        return;
-                    }
+                    OnSnapshotComplete(false);
+                    return;
                 }
                 
                 // Store the current capture coordinates for use with OCR results
@@ -2114,34 +2260,14 @@ namespace UGTLive
             //if capture rect is less than 1 pixel, don't capture
             if (captureRect.Width < 1 || captureRect.Height < 1) return;
 
+            bool needsCleanCaptureForOcr = GetIsStarted() && GetOCRCheckIsWanted();
+
             // Create bitmap with window dimensions
             using (Bitmap bitmap = new Bitmap(captureRect.Width, captureRect.Height))
             {
-                // Use direct GDI capture with the overlay hidden
-                using (Graphics g = Graphics.FromImage(bitmap))
+                if (!TryCopyCaptureRectToBitmap(bitmap, needsCleanCaptureForOcr, "screen capture"))
                 {
-                    // Configure for speed and quality
-                    g.CompositingQuality = CompositingQuality.HighSpeed;
-                    g.SmoothingMode = SmoothingMode.HighSpeed;
-                    g.InterpolationMode = InterpolationMode.Low;
-                    g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
-                   
-                    try
-                    {
-                        g.CopyFromScreen(
-                            captureRect.Left,
-                            captureRect.Top,
-                            0, 0,
-                            bitmap.Size,
-                            CopyPixelOperation.SourceCopy);
-                      
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error during screen capture: {ex.Message}");
-                        Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                    }
-                      
+                    return;
                 }
                 
                 // Store the current capture coordinates for use with OCR results
@@ -2162,8 +2288,7 @@ namespace UGTLive
                         return;
                     }
 
-                    Stopwatch stopwatch = new Stopwatch();
-                    stopwatch.Start();
+                    Logic.Instance.BeginOcrTranslateCycle();
 
                     SetOCRCheckIsWanted(false);
                     
@@ -2202,8 +2327,6 @@ namespace UGTLive
                         // The logic will handle cloning the bitmap and converting to bytes
                         Logic.Instance.SendImageToHttpOCR(bitmap);
                     }
-
-                    stopwatch.Stop();
                 }
                 catch (Exception ex)
                 {
@@ -2214,6 +2337,72 @@ namespace UGTLive
                 }
             }
 
+        }
+
+        private bool TryCopyCaptureRectToBitmap(Bitmap bitmap, bool suppressMainWindowOverlay, string errorContext)
+        {
+            Visibility originalOverlayVisibility = Visibility.Hidden;
+            bool overlayWasSuppressed = false;
+
+            try
+            {
+                if (suppressMainWindowOverlay && OverlayContent != null)
+                {
+                    originalOverlayVisibility = OverlayContent.Visibility;
+                    if (originalOverlayVisibility == Visibility.Visible)
+                    {
+                        OverlayContent.Visibility = Visibility.Hidden;
+                        FlushWindowForCapture();
+                        overlayWasSuppressed = true;
+                    }
+                }
+
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.CompositingQuality = CompositingQuality.HighSpeed;
+                    g.SmoothingMode = SmoothingMode.HighSpeed;
+                    g.InterpolationMode = InterpolationMode.Low;
+                    g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
+
+                    g.CopyFromScreen(
+                        captureRect.Left,
+                        captureRect.Top,
+                        0, 0,
+                        bitmap.Size,
+                        CopyPixelOperation.SourceCopy);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during {errorContext}: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                return false;
+            }
+            finally
+            {
+                if (overlayWasSuppressed && OverlayContent != null)
+                {
+                    OverlayContent.Visibility = originalOverlayVisibility;
+                    FlushWindowForCapture();
+                }
+            }
+        }
+
+        private void FlushWindowForCapture()
+        {
+            UpdateLayout();
+            Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+
+            try
+            {
+                DwmFlush();
+            }
+            catch
+            {
+                // Ignore DWM flush failures and keep the capture path moving.
+            }
         }
         
         private void MinimizeButton_Click(object sender, RoutedEventArgs e)
@@ -3061,40 +3250,93 @@ namespace UGTLive
             {
                 // Check if user wants windows visible in screenshots
                 bool visibleInScreenshots = ConfigManager.Instance.GetWindowsVisibleInScreenshots();
+                uint affinity = visibleInScreenshots ? WDA_NONE : WDA_EXCLUDEFROMCAPTURE;
                 
                 if (textOverlayWebView?.CoreWebView2 != null)
                 {
-                    // WebView2 is based on Chromium and doesn't create traditional Win32 child windows
-                    // Instead, we need to get the WebView2 control's HWND using HwndSource
+                    IntPtr mainWindowHwnd = new WindowInteropHelper(this).Handle;
+                    if (mainWindowHwnd == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    HashSet<IntPtr> processedHandles = new HashSet<IntPtr>();
+                    bool appliedToSeparateWindow = false;
+
+                    void TryApplyAffinity(IntPtr hwnd, string source)
+                    {
+                        if (hwnd == IntPtr.Zero || hwnd == mainWindowHwnd || !processedHandles.Add(hwnd))
+                        {
+                            return;
+                        }
+
+                        bool success = SetWindowDisplayAffinity(hwnd, affinity);
+                        if (success)
+                        {
+                            appliedToSeparateWindow = true;
+                            if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                            {
+                                Console.WriteLine($"MainWindow capture exclusion applied to {source} (HWND: {hwnd})");
+                            }
+                        }
+                        else if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                        {
+                            Console.WriteLine($"Failed to set capture mode for {source}. Last error: {Marshal.GetLastWin32Error()}");
+                        }
+                    }
+
                     var presentationSource = PresentationSource.FromVisual(textOverlayWebView);
                     if (presentationSource is HwndSource hwndSource)
                     {
-                        IntPtr webViewHwnd = hwndSource.Handle;
-                        
-                        if (webViewHwnd != IntPtr.Zero)
+                        TryApplyAffinity(hwndSource.Handle, "MainWindow WebView2 HwndSource");
+                    }
+
+                    EnumChildWindows(mainWindowHwnd, (hWnd, lParam) =>
+                    {
+                        StringBuilder className = new StringBuilder(256);
+                        GetClassName(hWnd, className, className.Capacity);
+                        TryApplyAffinity(hWnd, $"MainWindow child '{className}'");
+                        return true;
+                    }, IntPtr.Zero);
+
+                    var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
+                    foreach (System.Diagnostics.ProcessThread thread in currentProcess.Threads)
+                    {
+                        try
                         {
-                            uint affinity = visibleInScreenshots ? WDA_NONE : WDA_EXCLUDEFROMCAPTURE;
-                            bool success = SetWindowDisplayAffinity(webViewHwnd, affinity);
-                            
-                            if (success)
+                            EnumThreadWindows((uint)thread.Id, (hWnd, lParam) =>
                             {
-                                Console.WriteLine($"MainWindow WebView2 excluded from screen capture successfully (HWND: {webViewHwnd})");
-                            }
-                            else
-                            {
-                                Console.WriteLine($"Failed to set MainWindow WebView2 capture mode. Last error: {Marshal.GetLastWin32Error()}");
-                            }
+                                if (hWnd == mainWindowHwnd)
+                                {
+                                    return true;
+                                }
+
+                                StringBuilder className = new StringBuilder(256);
+                                GetClassName(hWnd, className, className.Capacity);
+                                string classNameStr = className.ToString();
+                                bool looksLikeWebViewWindow =
+                                    classNameStr.Contains("Chrome_WidgetWin", StringComparison.OrdinalIgnoreCase) ||
+                                    classNameStr.Contains("WebView", StringComparison.OrdinalIgnoreCase) ||
+                                    classNameStr.Contains("Edge", StringComparison.OrdinalIgnoreCase) ||
+                                    classNameStr.Contains("Browser", StringComparison.OrdinalIgnoreCase);
+
+                                if (looksLikeWebViewWindow)
+                                {
+                                    TryApplyAffinity(hWnd, $"MainWindow thread window '{classNameStr}'");
+                                }
+
+                                return true;
+                            }, IntPtr.Zero);
                         }
-                        else
+                        catch
                         {
-                            Console.WriteLine("MainWindow WebView2 HWND is null");
+                            // Thread may have terminated, ignore
                         }
                     }
-                    else
+
+                    if (!appliedToSeparateWindow && ConfigManager.Instance.GetLogExtraDebugStuff())
                     {
-                        Console.WriteLine("MainWindow WebView2: Could not get HwndSource, WebView2 may share parent window HWND");
-                        // WebView2 shares the parent window's HWND, so we don't need to do anything special
-                        // The translucent/transparent parts won't be captured anyway
+                        Console.WriteLine("MainWindow WebView2 exclusion did not find a separate child/owned HWND; capture may still include overlay pixels.");
                     }
                 }
             }
@@ -3223,6 +3465,7 @@ namespace UGTLive
         
         private const uint GW_CHILD = 5;
         private const uint GW_HWNDNEXT = 2;
+        private const uint GW_OWNER = 4;
         
         // Win32 API for enumerating child windows
         [DllImport("user32.dll")]
@@ -3702,7 +3945,8 @@ namespace UGTLive
                         // Add speaker icon - show if preload is enabled
                         bool isTtsPreloadEnabled = ConfigManager.Instance.IsTtsPreloadEnabled();
                         string preloadMode = ConfigManager.Instance.GetTtsPreloadMode();
-                        bool preloadEnabled = isTtsPreloadEnabled && preloadMode != "Off";
+                        bool preloadEnabled = ConfigManager.Instance.IsTtsEnabled()
+                            && isTtsPreloadEnabled && preloadMode != "Off";
                         
                         if (preloadEnabled)
                         {
@@ -4195,7 +4439,7 @@ namespace UGTLive
                 return;
             }
             
-            string newText = $"{ocrMethod} (fps: {fps:F1})";
+            string newText = TranslationStatus.BuildOcrStatusMessage(ocrMethod, fps);
             
             // Broadcast to all windows
             TranslationStatus.SetStatus(newText);
@@ -4709,14 +4953,38 @@ namespace UGTLive
 
         private void CreateAndShowToolbar()
         {
-            _toolbarWindow = new ToolbarWindow();
-            _toolbarWindow.Owner = this;
-            _toolbarWindow.Show();
+            if (_toolbarWindow != null && _toolbarWindow.IsLoaded)
+            {
+                if (!_toolbarWindow.IsVisible)
+                {
+                    _toolbarWindow.Show();
+                }
+                _toolbarWindow.BringToFront();
+                UpdateToolbarPosition();
+                return;
+            }
+
+            if (ToolbarWindow.Instance != null && ToolbarWindow.Instance.IsLoaded)
+            {
+                _toolbarWindow = ToolbarWindow.Instance;
+                if (!_toolbarWindow.IsVisible)
+                {
+                    _toolbarWindow.Show();
+                }
+                _toolbarWindow.BringToFront();
+            }
+            else
+            {
+                _toolbarWindow = new ToolbarWindow();
+                _toolbarWindow.Owner = this;
+                _toolbarWindow.Show();
+            }
 
             // Load persisted offset
             _toolbarOffsetX = ConfigManager.Instance.GetToolbarOffsetX();
             _toolbarOffsetY = ConfigManager.Instance.GetToolbarOffsetY();
 
+            CleanupDuplicateToolbars();
             UpdateToolbarPosition();
         }
 
@@ -4730,8 +4998,8 @@ namespace UGTLive
 
             double tbWidth = _toolbarWindow.ActualWidth > 0 ? _toolbarWindow.ActualWidth : _toolbarWindow.Width;
             double tbHeight = _toolbarWindow.ActualHeight > 0 ? _toolbarWindow.ActualHeight : _toolbarWindow.Height;
-            if (double.IsNaN(tbWidth) || tbWidth <= 0) tbWidth = 60;
-            if (double.IsNaN(tbHeight) || tbHeight <= 0) tbHeight = 400;
+            if (double.IsNaN(tbWidth) || tbWidth <= 0) tbWidth = 130; // Match actual rendered width (110px content + padding/border)
+            if (double.IsNaN(tbHeight) || tbHeight <= 0) tbHeight = 500;
 
             if (!ConfigManager.IsWindowBoundsValid(newLeft, newTop, tbWidth, tbHeight, minVisiblePixels: 40))
             {

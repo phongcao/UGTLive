@@ -1057,6 +1057,69 @@ namespace UGTLive
                 }
             }
         }
+
+        private void RefreshAfterGenericLlmOcrSettingChange()
+        {
+            if (!string.Equals(MainWindow.Instance.GetSelectedOcrMethod(), "Generic LLM OCR", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            Logic.Instance.ResetHash();
+            Logic.Instance.ClearAllTextObjects();
+
+            if (MainWindow.Instance.GetIsStarted())
+            {
+                MainWindow.Instance.SetOCRCheckIsWanted(true);
+            }
+        }
+
+        private void GenericLlmOcrApiBaseTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            string apiBase = genericLlmOcrApiBaseTextBox.Text.Trim();
+            if (!string.IsNullOrWhiteSpace(apiBase))
+            {
+                ConfigManager.Instance.SetGenericLlmOcrApiBase(apiBase);
+                RefreshAfterGenericLlmOcrSettingChange();
+            }
+        }
+
+        private void GenericLlmOcrApiKeyPasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            ConfigManager.Instance.SetGenericLlmOcrApiKey(genericLlmOcrApiKeyPasswordBox.Password.Trim());
+        }
+
+        private void GenericLlmOcrModelTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            string model = genericLlmOcrModelTextBox.Text.Trim();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                ConfigManager.Instance.SetGenericLlmOcrModel(model);
+                RefreshAfterGenericLlmOcrSettingChange();
+            }
+        }
+
+        private void GenericLlmOcrModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            if (genericLlmOcrModeComboBox.SelectedItem is ComboBoxItem selectedItem)
+            {
+                string mode = selectedItem.Content?.ToString() ?? "OCR + Translate";
+                ConfigManager.Instance.SetGenericLlmOcrMode(mode);
+                RefreshAfterGenericLlmOcrSettingChange();
+            }
+        }
         
         private void AutoTranslateCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
         {
@@ -1280,6 +1343,7 @@ namespace UGTLive
                 bool isGoogleVisionSelected = string.Equals(selectedOcr, "Google Vision", StringComparison.OrdinalIgnoreCase);
                 bool isMangaOcrSelected = string.Equals(selectedOcr, "MangaOCR", StringComparison.OrdinalIgnoreCase);
                 bool isPaddleOcrSelected = string.Equals(selectedOcr, "PaddleOCR", StringComparison.OrdinalIgnoreCase);
+                bool isGenericLlmOcrSelected = string.Equals(selectedOcr, "Generic LLM OCR", StringComparison.OrdinalIgnoreCase);
                 
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
@@ -1288,6 +1352,34 @@ namespace UGTLive
                 
                 bool isEasyOcrSelected = string.Equals(selectedOcr, "EasyOCR", StringComparison.OrdinalIgnoreCase);
                 bool isDocTrSelected = string.Equals(selectedOcr, "docTR", StringComparison.OrdinalIgnoreCase);
+
+                if (genericLlmOcrSettingsLabel != null)
+                    genericLlmOcrSettingsLabel.Visibility = isGenericLlmOcrSelected ? Visibility.Visible : Visibility.Collapsed;
+                if (genericLlmOcrSettingsGrid != null)
+                    genericLlmOcrSettingsGrid.Visibility = isGenericLlmOcrSelected ? Visibility.Visible : Visibility.Collapsed;
+
+                if (isGenericLlmOcrSelected)
+                {
+                    if (genericLlmOcrApiBaseTextBox != null)
+                        genericLlmOcrApiBaseTextBox.Text = ConfigManager.Instance.GetGenericLlmOcrApiBase();
+                    if (genericLlmOcrApiKeyPasswordBox != null)
+                        genericLlmOcrApiKeyPasswordBox.Password = ConfigManager.Instance.GetGenericLlmOcrApiKey();
+                    if (genericLlmOcrModelTextBox != null)
+                        genericLlmOcrModelTextBox.Text = ConfigManager.Instance.GetGenericLlmOcrModel();
+                    if (genericLlmOcrModeComboBox != null)
+                    {
+                        genericLlmOcrModeComboBox.SelectionChanged -= GenericLlmOcrModeComboBox_SelectionChanged;
+                        foreach (ComboBoxItem item in genericLlmOcrModeComboBox.Items)
+                        {
+                            if (string.Equals(item.Content?.ToString(), ConfigManager.Instance.GetGenericLlmOcrMode(), StringComparison.OrdinalIgnoreCase))
+                            {
+                                genericLlmOcrModeComboBox.SelectedItem = item;
+                                break;
+                            }
+                        }
+                        genericLlmOcrModeComboBox.SelectionChanged += GenericLlmOcrModeComboBox_SelectionChanged;
+                    }
+                }
 
                 // Confidence settings are only useful for EasyOCR, docTR, and Google Vision
                 bool showConfidenceSettings = isEasyOcrSelected || isDocTrSelected || isGoogleVisionSelected || isPaddleOcrSelected;

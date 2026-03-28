@@ -30,6 +30,18 @@ namespace UGTLive
 
         public ToolbarWindow()
         {
+            if (Instance != null && Instance != this && Instance.IsLoaded)
+            {
+                try
+                {
+                    Instance.Close();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error closing previous toolbar instance: {ex.Message}");
+                }
+            }
+
             Instance = this;
             InitializeComponent();
             IconHelper.SetWindowIcon(this);
@@ -40,7 +52,9 @@ namespace UGTLive
 
         private void ToolbarWindow_SourceInitialized(object? sender, EventArgs e)
         {
-            SetExcludeFromCapture();
+            // WDA_EXCLUDEFROMCAPTURE (0x11) makes the toolbar completely invisible on some
+            // systems/GPU drivers. Disabled until a reliable alternative is found.
+            // SetExcludeFromCapture();
         }
 
         private void ToolbarWindow_Loaded(object sender, RoutedEventArgs e)
@@ -102,6 +116,16 @@ namespace UGTLive
                     BringToFront();
                 }
             }), DispatcherPriority.Input);
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            base.OnClosed(e);
+
+            if (Instance == this)
+            {
+                Instance = null;
+            }
         }
 
         // --- Window-level drag (anywhere that isn't an interactive control) ---

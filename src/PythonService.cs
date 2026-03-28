@@ -338,13 +338,14 @@ namespace UGTLive
                     // Generate a unique title for the window to help us find it later
                     // This is crucial for reliable window finding and hiding
                     string uniqueTitle = $"UGTLive_Service_{ServiceName}_{Port}";
+                    string visualStudioDebugFlag = Debugger.IsAttached ? "1" : "0";
                     
                     ProcessStartInfo psi = new ProcessStartInfo
                     {
                         FileName = "cmd.exe",
                         // Use /c to run the command and terminate, but the command runs the batch file
                         // We set the title first so we can find the window later
-                        Arguments = $"/c title {uniqueTitle} & \"{batchFile}\" nopause",
+                        Arguments = $"/c title {uniqueTitle} & set \"UGTLIVE_VISUAL_STUDIO_DEBUG={visualStudioDebugFlag}\" & \"{batchFile}\" nopause",
                         WorkingDirectory = ServiceDirectory,
                         UseShellExecute = true, // Always use shell execute to get a window we can control
                         WindowStyle = showWindow ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden,
@@ -506,6 +507,8 @@ namespace UGTLive
         /// </summary>
         public async Task<bool> StopAsync()
         {
+            Process? trackedProcess = _process;
+
             try
             {
                 // Send shutdown signal
@@ -539,7 +542,37 @@ namespace UGTLive
             IsRunning = false;
             
             // Wait for it to actually stop
-            return await WaitForServiceShutdownAsync(10);
+            bool stopped = await WaitForServiceShutdownAsync(10);
+            if (stopped)
+            {
+                return true;
+            }
+
+            if (trackedProcess != null)
+            {
+                TryForceKillProcessTree(trackedProcess);
+                return await WaitForServiceShutdownAsync(5);
+            }
+
+            return false;
+        }
+
+        private void TryForceKillProcessTree(Process process)
+        {
+            try
+            {
+                if (process.HasExited)
+                {
+                    return;
+                }
+
+                process.Kill(entireProcessTree: true);
+                Console.WriteLine($"Force-killed process tree for {ServiceName} (PID {process.Id})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to force-kill process tree for {ServiceName}: {ex.Message}");
+            }
         }
         
         private async Task<bool> WaitForServiceShutdownAsync(int timeoutSeconds)

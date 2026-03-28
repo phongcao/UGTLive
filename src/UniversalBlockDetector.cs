@@ -818,6 +818,64 @@ namespace UGTLive
         private JsonElement CreateJsonOutput(List<TextElement> paragraphs, List<TextElement> nonCharacters)
         {
             int minTextFragmentSize = ConfigManager.Instance.GetMinTextFragmentSize();
+            string sourceLang = ConfigManager.Instance.GetSourceLanguage();
+            bool isEastAsian = sourceLang == "ja" || sourceLang == "ch_sim" || sourceLang == "ch_tra" || sourceLang == "ko";
+
+            void CollectTranslatedLeafTexts(TextElement element, List<string> parts)
+            {
+                if (element.OriginalItem.ValueKind != JsonValueKind.Undefined &&
+                    element.OriginalItem.ValueKind != JsonValueKind.Null &&
+                    element.OriginalItem.TryGetProperty("translated_text", out JsonElement translatedElement))
+                {
+                    string translated = translatedElement.GetString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(translated))
+                    {
+                        parts.Add(translated.Trim());
+                    }
+                }
+
+                if (element.Children != null)
+                {
+                    foreach (var child in element.Children)
+                    {
+                        CollectTranslatedLeafTexts(child, parts);
+                    }
+                }
+            }
+
+            string? BuildTranslatedParagraphText(TextElement paragraph)
+            {
+                var lineTranslations = new List<string>();
+
+                foreach (var line in paragraph.Children)
+                {
+                    var parts = new List<string>();
+                    CollectTranslatedLeafTexts(line, parts);
+
+                    if (parts.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    string lineText = isEastAsian
+                        ? string.Join(string.Empty, parts)
+                        : string.Join(" ", parts);
+
+                    if (!string.IsNullOrWhiteSpace(lineText))
+                    {
+                        lineTranslations.Add(lineText.Trim());
+                    }
+                }
+
+                if (lineTranslations.Count == 0)
+                {
+                    return null;
+                }
+
+                return lineTranslations.Count == 1
+                    ? lineTranslations[0]
+                    : string.Join("\n", lineTranslations);
+            }
             
             using (var stream = new MemoryStream())
             {
@@ -831,6 +889,11 @@ namespace UGTLive
                         
                         writer.WriteStartObject();
                         writer.WriteString("text", paragraph.Text);
+                        string? translatedText = BuildTranslatedParagraphText(paragraph);
+                        if (!string.IsNullOrWhiteSpace(translatedText))
+                        {
+                            writer.WriteString("translated_text", translatedText);
+                        }
                         writer.WriteNumber("confidence", paragraph.Confidence);
                         writer.WriteString("text_orientation", paragraph.TextOrientation);
 

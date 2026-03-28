@@ -254,6 +254,45 @@
                                           VerticalAlignment="Center" Margin="0,0,10,0"/>
                                 <ComboBox x:Name="ocrMethodComboBox" Grid.Row="0" Grid.Column="1" 
                                          Margin="0,5" SelectionChanged="OcrMethodComboBox_SelectionChanged"/>
+
+                                <!-- Generic LLM OCR Settings -->
+                                <TextBlock x:Name="genericLlmOcrSettingsLabel" Text="Generic LLM OCR Settings:" Grid.Row="1" Grid.Column="0"
+                                          VerticalAlignment="Top" Margin="0,8,10,0" Visibility="Collapsed"/>
+                                <Grid x:Name="genericLlmOcrSettingsGrid" Grid.Row="1" Grid.Column="1" Margin="0,5,0,5" Visibility="Collapsed">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="API Base:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBox x:Name="genericLlmOcrApiBaseTextBox" Grid.Row="0" Grid.Column="1"
+                                             Margin="0,0,0,6" LostFocus="GenericLlmOcrApiBaseTextBox_LostFocus"
+                                             ToolTip="OpenAI-compatible base URL, for example http://127.0.0.1:1234 or http://localhost:8000/v1"/>
+
+                                    <TextBlock Text="API Key:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <PasswordBox x:Name="genericLlmOcrApiKeyPasswordBox" Grid.Row="1" Grid.Column="1"
+                                                 Margin="0,0,0,6" PasswordChanged="GenericLlmOcrApiKeyPasswordBox_PasswordChanged"
+                                                 ToolTip="Optional API key for the OpenAI-compatible endpoint"/>
+
+                                    <TextBlock Text="Model:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBox x:Name="genericLlmOcrModelTextBox" Grid.Row="2" Grid.Column="1"
+                                             Margin="0,0,0,6" LostFocus="GenericLlmOcrModelTextBox_LostFocus"
+                                             ToolTip="Vision model ID to send to the OpenAI-compatible endpoint"/>
+
+                                    <TextBlock Text="Mode:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <ComboBox x:Name="genericLlmOcrModeComboBox" Grid.Row="3" Grid.Column="1"
+                                              SelectionChanged="GenericLlmOcrModeComboBox_SelectionChanged"
+                                              ToolTip="OCR Only performs detection only. OCR + Translate returns translated text in the same request.">
+                                        <ComboBoxItem Content="OCR + Translate"/>
+                                        <ComboBoxItem Content="OCR Only"/>
+                                    </ComboBox>
+                                </Grid>
                                 
                                 <!-- Pause OCR While Translating -->
                                 <TextBlock Text="Pause OCR while translating:" Grid.Row="2" Grid.Column="0"

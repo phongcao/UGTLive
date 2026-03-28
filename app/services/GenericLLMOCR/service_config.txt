@@ -1,0 +1,9 @@
+description|A generic OpenAI-compatible vision OCR backend that can optionally translate in the same request.|
+github_url|https://platform.openai.com/docs/api-reference/chat/create|
+service_author|GitHub Copilot|
+service_name|Generic LLM OCR|
+venv_name|ugt_generic_llm_ocr|
+port|5005|
+server_url|http://127.0.0.1|
+local_only|true|
+service_install_version|1|

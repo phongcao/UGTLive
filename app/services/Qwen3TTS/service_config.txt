@@ -1,9 +1,9 @@
-description|Open-source text-to-speech engine supporting English, Japanese, and 8 other languages. Runs locally via Qwen3-TTS model.|
-github_url|https://github.com/QwenLM/Qwen3-TTS|
+description|Open-source text-to-speech engine using faster-qwen3-tts for local streaming synthesis in English, Japanese, and 8 other languages.|
+github_url|https://github.com/andimarafioti/faster-qwen3-tts|
 service_author|Seth A. Robinson|
 service_name|Qwen3TTS|
 venv_name|ugt_qwen3tts|
 port|5004|
 server_url|http://127.0.0.1|
 local_only|true|
-service_install_version|1|
+service_install_version|2|

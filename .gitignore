@@ -426,10 +426,12 @@ service_install_version_last_installed.txt
 
 app/services/util/Python*/
 app/services/**/venv/
+app/services/GenericLLMOCR/debug/
 debug_processed_image.png
 debug_received_image.png
 debug_original.png
 raw_test_output.png
 temp_processing_image.png
 manual_debug.png
+app/services/GenericLLMOCR/server_log.txt
 

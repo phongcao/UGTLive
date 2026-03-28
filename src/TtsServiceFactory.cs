@@ -12,17 +12,19 @@ namespace UGTLive
 
         public static ITtsService CreateService(string serviceName)
         {
-            return serviceName switch
+            ITtsService service = serviceName switch
             {
                 "Google Cloud TTS" => GoogleTTSService.Instance,
                 "Qwen3-TTS" => Qwen3TtsService.Instance,
                 _ => ElevenLabsService.Instance
             };
+
+            return new TimedTtsService(service);
         }
 
         public static bool IsLocalService(string serviceName)
         {
-            return serviceName == "Qwen3-TTS";
+            return serviceName == "Qwen3-TTS" && ConfigManager.Instance.IsQwen3TtsLocalBackend();
         }
     }
 }

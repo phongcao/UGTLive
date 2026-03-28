@@ -21,6 +21,7 @@ class BackgroundForegroundColors(BaseModel):
 class TextObject(BaseModel):
     """OCR text object containing detected text and metadata."""
     text: str
+    translated_text: Optional[str] = None
     x: int
     y: int
     width: int
@@ -40,6 +41,7 @@ class OCRResponse(BaseModel):
     processing_time: float
     language: str
     char_level: bool
+    includes_translations: bool = False
     backend: str = "cpu"
 
 

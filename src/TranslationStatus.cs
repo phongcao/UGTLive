@@ -22,6 +22,12 @@ namespace UGTLive
         
         // Current status message displayed across all windows
         private static string _currentMessage = "Stopped";
+
+        // Last completed end-to-end OCR + translation processing time in milliseconds
+        private static long? _lastOcrTranslateProcessingTimeMs = null;
+
+        // Last completed TTS processing time in milliseconds
+        private static long? _lastTtsProcessingTimeMs = null;
         
         /// <summary>
         /// Event raised when status message changes
@@ -62,6 +68,22 @@ namespace UGTLive
         {
             get { lock (_lock) { return _currentMessage; } }
         }
+
+        /// <summary>
+        /// Last completed OCR + translation processing time in milliseconds.
+        /// </summary>
+        public static long? LastOcrTranslateProcessingTimeMs
+        {
+            get { lock (_lock) { return _lastOcrTranslateProcessingTimeMs; } }
+        }
+
+        /// <summary>
+        /// Last completed TTS processing time in milliseconds.
+        /// </summary>
+        public static long? LastTtsProcessingTimeMs
+        {
+            get { lock (_lock) { return _lastTtsProcessingTimeMs; } }
+        }
         
         /// <summary>
         /// Set the status message and notify all subscribers
@@ -95,6 +117,67 @@ namespace UGTLive
                 _isThinking = false;
                 _isStreaming = false;
             }
+        }
+
+        /// <summary>
+        /// Clear the last OCR + translation processing time.
+        /// </summary>
+        public static void ClearLastOcrTranslateProcessingTime()
+        {
+            lock (_lock)
+            {
+                _lastOcrTranslateProcessingTimeMs = null;
+            }
+        }
+
+        /// <summary>
+        /// Record the last completed OCR + translation processing time.
+        /// </summary>
+        public static void SetLastOcrTranslateProcessingTime(long elapsedMilliseconds)
+        {
+            lock (_lock)
+            {
+                _lastOcrTranslateProcessingTimeMs = elapsedMilliseconds;
+            }
+        }
+
+        /// <summary>
+        /// Record the last completed TTS processing time.
+        /// </summary>
+        public static void SetLastTtsProcessingTime(long elapsedMilliseconds)
+        {
+            lock (_lock)
+            {
+                _lastTtsProcessingTimeMs = elapsedMilliseconds;
+            }
+        }
+
+        /// <summary>
+        /// Build the shared OCR status message including the latest processing metrics.
+        /// </summary>
+        public static string BuildOcrStatusMessage(string ocrMethod, double fps)
+        {
+            lock (_lock)
+            {
+                string ocrTranslateTime = FormatElapsedMilliseconds(_lastOcrTranslateProcessingTimeMs);
+                string ttsTime = FormatElapsedMilliseconds(_lastTtsProcessingTimeMs);
+                return $"{ocrMethod} (fps: {fps:F1}, ocr+tr: {ocrTranslateTime}, tts: {ttsTime})";
+            }
+        }
+
+        private static string FormatElapsedMilliseconds(long? elapsedMilliseconds)
+        {
+            if (!elapsedMilliseconds.HasValue)
+            {
+                return "--";
+            }
+
+            if (elapsedMilliseconds.Value >= 10000)
+            {
+                return $"{elapsedMilliseconds.Value / 1000.0:F1}s";
+            }
+
+            return $"{elapsedMilliseconds.Value} ms";
         }
         
         /// <summary>

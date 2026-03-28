@@ -44,6 +44,12 @@ namespace UGTLive
         
         public async Task PlayAudioFileAsync(string filePath, string? textObjectId = null, bool isPartOfPlayAll = false, CancellationToken cancellationToken = default)
         {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                Console.WriteLine("AudioPlaybackManager: Playback skipped because TTS is disabled");
+                return;
+            }
+
             if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath))
             {
                 Console.WriteLine($"Audio file not found: {filePath}");
@@ -288,6 +294,8 @@ namespace UGTLive
                 _isPlayingAll = false;
                 // Don't reset _autoPlayTriggered here - if stopped manually, we don't want auto-play to trigger again for this session
             }
+
+            Qwen3TtsService.Instance.StopActivePlayback();
             
             // Update current playing ID and transition state
             // This avoids race condition when switching between playing audio files
@@ -336,6 +344,16 @@ namespace UGTLive
         
         public async Task PlayAllAudioAsync(List<TextObject> textObjects, string playOrder, bool useSourceAudio)
         {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                lock (_playbackLock)
+                {
+                    _autoPlayTriggered = false;
+                }
+                Console.WriteLine("AudioPlaybackManager: Play-all skipped because TTS is disabled");
+                return;
+            }
+
             if (textObjects == null || textObjects.Count == 0)
             {
                 // Reset auto-play trigger flag if no text objects
@@ -401,19 +419,29 @@ namespace UGTLive
             
             // Sort text objects based on play order
             var sortedObjects = SortTextObjectsByPlayOrder(textObjects, playOrder);
+            bool useLocalQwenStreaming = ShouldUseLocalQwenStreamingForPlayAll(useSourceAudio, out string streamingVoice);
             
-            // Filter objects that have audio ready (prefer preferred type, but include fallback)
-            // Include objects that have either source or target audio, matching speaker icon behavior
-            var objectsWithAudio = sortedObjects.Where(obj =>
+            List<TextObject> objectsToPlay;
+            if (useLocalQwenStreaming)
             {
-                if (ConfigManager.Instance.IsTextBelowTtsMinChars(obj.Text))
-                    return false;
-                bool hasSourceAudio = obj.SourceAudioReady && !string.IsNullOrEmpty(obj.SourceAudioFilePath);
-                bool hasTargetAudio = obj.TargetAudioReady && !string.IsNullOrEmpty(obj.TargetAudioFilePath);
-                return hasSourceAudio || hasTargetAudio;
-            }).ToList();
+                objectsToPlay = sortedObjects.Where(obj => TryGetStreamingTextForObject(obj, useSourceAudio, out _)).ToList();
+                Console.WriteLine($"PlayAllAudio: Using local Qwen3-TTS live streaming for {objectsToPlay.Count} text objects");
+            }
+            else
+            {
+                // Filter objects that have audio ready (prefer preferred type, but include fallback)
+                // Include objects that have either source or target audio, matching speaker icon behavior
+                objectsToPlay = sortedObjects.Where(obj =>
+                {
+                    if (ConfigManager.Instance.IsTextBelowTtsMinChars(obj.Text))
+                        return false;
+                    bool hasSourceAudio = obj.SourceAudioReady && !string.IsNullOrEmpty(obj.SourceAudioFilePath);
+                    bool hasTargetAudio = obj.TargetAudioReady && !string.IsNullOrEmpty(obj.TargetAudioFilePath);
+                    return hasSourceAudio || hasTargetAudio;
+                }).ToList();
+            }
             
-            if (objectsWithAudio.Count == 0)
+            if (objectsToPlay.Count == 0)
             {
                 Console.WriteLine("No audio files available to play");
                 // Reset auto-play trigger flag if no audio files available
@@ -442,11 +470,66 @@ namespace UGTLive
             try
             {
                 // Play each audio file sequentially (not in Task.Run to ensure proper async/await)
-                foreach (var textObj in objectsWithAudio)
+                foreach (var textObj in objectsToPlay)
                 {
                     if (cancellationToken.IsCancellationRequested)
                     {
                         break;
+                    }
+
+                    if (useLocalQwenStreaming)
+                    {
+                        if (!TryGetStreamingTextForObject(textObj, useSourceAudio, out string textToSpeak))
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            lock (_playbackLock)
+                            {
+                                _currentPlayingTextObjectId = textObj.ID;
+                            }
+                            OnCurrentPlayingTextObjectChanged(textObj.ID);
+
+                            if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                            {
+                                Console.WriteLine($"PlayAllAudio: Streaming audio for text object {textObj.ID}");
+                            }
+
+                            bool success = await Qwen3TtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
+
+                            if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                            {
+                                Console.WriteLine($"PlayAllAudio: Finished streaming audio for text object {textObj.ID}, success={success}");
+                            }
+
+                            lock (_playbackLock)
+                            {
+                                if (_currentPlayingTextObjectId == textObj.ID)
+                                {
+                                    _currentPlayingTextObjectId = null;
+                                }
+                            }
+                            OnCurrentPlayingTextObjectChanged(null);
+
+                            if (cancellationToken.IsCancellationRequested)
+                            {
+                                break;
+                            }
+
+                            continue;
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Error streaming audio for text object {textObj.ID}: {ex.Message}");
+                            lock (_playbackLock)
+                            {
+                                _currentPlayingTextObjectId = null;
+                            }
+                            OnCurrentPlayingTextObjectChanged(null);
+                            continue;
+                        }
                     }
                     
                     // Try preferred audio type first, then fall back to the other type (matching speaker icon behavior)
@@ -519,6 +602,40 @@ namespace UGTLive
                 }
                 OnPlayAllStateChanged(false);
             }
+        }
+
+        private bool ShouldUseLocalQwenStreamingForPlayAll(bool useSourceAudio, out string voice)
+        {
+            string service = useSourceAudio
+                ? ConfigManager.Instance.GetTtsSourceService()
+                : ConfigManager.Instance.GetTtsTargetService();
+
+            voice = useSourceAudio
+                ? ConfigManager.Instance.GetTtsSourceVoice()
+                : ConfigManager.Instance.GetTtsTargetVoice();
+
+            if (service != "Qwen3-TTS" || !TtsServiceFactory.IsLocalService(service))
+            {
+                return false;
+            }
+
+            if (!Qwen3TtsService.AvailableVoices.ContainsValue(voice))
+            {
+                voice = ConfigManager.Instance.GetQwen3TtsVoice();
+            }
+
+            return true;
+        }
+
+        private bool TryGetStreamingTextForObject(TextObject textObj, bool useSourceAudio, out string textToSpeak)
+        {
+            textToSpeak = useSourceAudio ? textObj.Text : textObj.TextTranslated;
+            if (string.IsNullOrWhiteSpace(textToSpeak))
+            {
+                return false;
+            }
+
+            return !ConfigManager.Instance.IsTextBelowTtsMinChars(textToSpeak);
         }
         
         private void OnPlayAllStateChanged(bool isPlaying)
@@ -642,6 +759,15 @@ namespace UGTLive
         
         public void CheckAndTriggerAutoPlay()
         {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                lock (_playbackLock)
+                {
+                    _autoPlayTriggered = false;
+                }
+                return;
+            }
+
             if (!ConfigManager.Instance.IsTtsAutoPlayAllEnabled())
             {
                 return;
@@ -683,31 +809,53 @@ namespace UGTLive
                 return;
             }
             
-            // Determine which audio to play based on overlay mode
-            // If overlay is None or Source, play source audio
-            // If overlay is Translation, play target audio
-            string overlayMode = ConfigManager.Instance.GetMainWindowOverlayMode();
-            bool useSourceAudio = overlayMode != "Translated";
-            
-            // Check if we should play source or target based on what's available
-            bool hasSourceAudio = textObjects.Any(obj => obj.SourceAudioReady);
-            bool hasTargetAudio = textObjects.Any(obj => obj.TargetAudioReady && !string.IsNullOrEmpty(obj.TextTranslated));
+            bool useSourceAudio;
+            if (preloadMode == "Target language")
+            {
+                useSourceAudio = false;
+            }
+            else if (preloadMode == "Source language")
+            {
+                useSourceAudio = true;
+            }
+            else
+            {
+                // For mixed mode, preserve the existing overlay-driven preference.
+                string overlayMode = ConfigManager.Instance.GetMainWindowOverlayMode();
+                useSourceAudio = overlayMode != "Translated";
+            }
+
+            bool useLocalQwenStreamingForSource = ShouldUseLocalQwenStreamingForPlayAll(useSourceAudio: true, out _);
+            bool useLocalQwenStreamingForTarget = ShouldUseLocalQwenStreamingForPlayAll(useSourceAudio: false, out _);
+
+            bool hasSourceAudio = useLocalQwenStreamingForSource
+                ? textObjects.Any(obj => TryGetStreamingTextForObject(obj, useSourceAudio: true, out _))
+                : textObjects.Any(obj => obj.SourceAudioReady && !string.IsNullOrEmpty(obj.SourceAudioFilePath));
+            bool hasTargetAudio = useLocalQwenStreamingForTarget
+                ? textObjects.Any(obj => TryGetStreamingTextForObject(obj, useSourceAudio: false, out _))
+                : textObjects.Any(obj => obj.TargetAudioReady && !string.IsNullOrEmpty(obj.TargetAudioFilePath));
+
+            Console.WriteLine(
+                $"CheckAndTriggerAutoPlay: preloadMode={preloadMode}, useSourceAudio={useSourceAudio}, sourceReady={hasSourceAudio}, targetReady={hasTargetAudio}, sourceLocalQwenStreaming={useLocalQwenStreamingForSource}, targetLocalQwenStreaming={useLocalQwenStreamingForTarget}");
             
             // Determine which to play
             if (useSourceAudio && hasSourceAudio)
             {
                 // Play source audio
                 string playOrder = ConfigManager.Instance.GetTtsPlayOrder();
+                Console.WriteLine("CheckAndTriggerAutoPlay: Triggering source autoplay");
                 _ = PlayAllAudioAsync(textObjects.ToList(), playOrder, useSourceAudio: true);
             }
             else if (!useSourceAudio && hasTargetAudio)
             {
                 // Play target audio
                 string playOrder = ConfigManager.Instance.GetTtsPlayOrder();
+                Console.WriteLine("CheckAndTriggerAutoPlay: Triggering target autoplay");
                 _ = PlayAllAudioAsync(textObjects.ToList(), playOrder, useSourceAudio: false);
             }
             else
             {
+                Console.WriteLine("CheckAndTriggerAutoPlay: No playable audio or streaming text available; resetting auto-play trigger");
                 // No audio to play, reset flag
                 lock (_playbackLock)
                 {

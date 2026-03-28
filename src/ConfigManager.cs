@@ -53,6 +53,11 @@ namespace UGTLive
         public const string GOOGLE_VISION_HORIZONTAL_GLUE = "google_vision_horizontal_glue";
         public const string GOOGLE_VISION_VERTICAL_GLUE = "google_vision_vertical_glue";
         public const string GOOGLE_VISION_KEEP_LINEFEEDS = "google_vision_keep_linefeeds";
+        public const string GENERIC_LLM_OCR_API_BASE = "generic_llm_ocr_api_base";
+        public const string GENERIC_LLM_OCR_API_KEY = "generic_llm_ocr_api_key";
+        public const string GENERIC_LLM_OCR_MODEL = "generic_llm_ocr_model";
+        public const string GENERIC_LLM_OCR_MODE = "generic_llm_ocr_mode";
+        public const string GENERIC_LLM_OCR_TARGET_LANGUAGE = "generic_llm_ocr_target_language";
         
         // Per-OCR glue settings (for EasyOCR, MangaOCR, docTR, Windows OCR, Google Vision)
         // Format: horizontal_glue_<ocrmethod>, vertical_glue_<ocrmethod>, keep_linefeeds_<ocrmethod>, leave_translation_onscreen_<ocrmethod>
@@ -123,6 +128,8 @@ namespace UGTLive
             "MangaOCR",
             "PaddleOCR",
             "docTR",
+            "Florence2",
+            "Generic LLM OCR",
             "Windows OCR",
             "Google Vision"
         };
@@ -134,6 +141,8 @@ namespace UGTLive
             { "MangaOCR", "MangaOCR (Vertical Japanese manga)" },
             { "PaddleOCR", "PaddleOCR (Multi-language)" },
             { "docTR", "docTR (Great at non-asian languages)" },
+            { "Florence2", "Florence2 (MS vision foundation model)" },
+            { "Generic LLM OCR", "Generic LLM OCR (OpenAI-compatible vision model)" },
             { "Windows OCR", "Windows OCR (mid at most languages)" },
             { "Google Vision", "Google Cloud Vision (non-local, costs $)" }
         };
@@ -164,9 +173,14 @@ namespace UGTLive
         public const string ELEVENLABS_CUSTOM_VOICE_ID = "elevenlabs_custom_voice_id";
         public const string GOOGLE_TTS_API_KEY = "google_tts_api_key";
         public const string GOOGLE_TTS_VOICE = "google_tts_voice";
+        public const string QWEN3_TTS_BACKEND = "qwen3_tts_backend";
         public const string QWEN3_TTS_URL = "qwen3_tts_url";
         public const string QWEN3_TTS_PORT = "qwen3_tts_port";
         public const string QWEN3_TTS_VOICE = "qwen3_tts_voice";
+        public const string QWEN3_TTS_FAST_MODE = "qwen3_tts_fast_mode";
+        public const string QWEN3_TTS_EXTERNAL_API_BASE = "qwen3_tts_external_api_base";
+        public const string QWEN3_TTS_EXTERNAL_API_KEY = "qwen3_tts_external_api_key";
+        public const string QWEN3_TTS_EXTERNAL_MODEL = "qwen3_tts_external_model";
         
         // TTS Preload configuration keys
         public const string TTS_SOURCE_SERVICE = "tts_source_service";
@@ -387,7 +401,15 @@ namespace UGTLive
                     ProcessSingleLineValues(content);
                 }
 
-                applyDeprecatedModelMigrations();
+                bool changed = false;
+                changed |= applyDeprecatedModelMigrations();
+                changed |= ensureGenericLlmOcrConfigDefaults();
+                changed |= ensureQwen3TtsConfigDefaults();
+
+                if (changed)
+                {
+                    SaveConfig();
+                }
             }
             catch (Exception ex)
             {
@@ -408,7 +430,7 @@ namespace UGTLive
         /// <summary>
         /// Remap model IDs that vendors have shut down or deprecated so existing config files keep working.
         /// </summary>
-        private void applyDeprecatedModelMigrations()
+        private bool applyDeprecatedModelMigrations()
         {
             bool changed = false;
 
@@ -420,10 +442,75 @@ namespace UGTLive
                 Console.WriteLine("Config: migrated gemini_model gemini-3-pro-preview -> gemini-3.1-pro-preview");
             }
 
-            if (changed)
+            return changed;
+        }
+
+        private bool ensureGenericLlmOcrConfigDefaults()
+        {
+            bool changed = false;
+
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_API_BASE))
             {
-                SaveConfig();
+                _configValues[GENERIC_LLM_OCR_API_BASE] = "http://127.0.0.1:1234";
+                changed = true;
             }
+
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_API_KEY))
+            {
+                _configValues[GENERIC_LLM_OCR_API_KEY] = "";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_MODEL))
+            {
+                _configValues[GENERIC_LLM_OCR_MODEL] = "qwen2.5-vl-7b-instruct";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_MODE))
+            {
+                _configValues[GENERIC_LLM_OCR_MODE] = "OCR + Translate";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_TARGET_LANGUAGE))
+            {
+                _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = GetValue(TARGET_LANGUAGE, "en");
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private bool ensureQwen3TtsConfigDefaults()
+        {
+            bool changed = false;
+
+            if (!_configValues.ContainsKey(QWEN3_TTS_BACKEND))
+            {
+                _configValues[QWEN3_TTS_BACKEND] = "local";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(QWEN3_TTS_EXTERNAL_API_BASE))
+            {
+                _configValues[QWEN3_TTS_EXTERNAL_API_BASE] = "http://127.0.0.1:8091/v1";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(QWEN3_TTS_EXTERNAL_API_KEY))
+            {
+                _configValues[QWEN3_TTS_EXTERNAL_API_KEY] = "";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(QWEN3_TTS_EXTERNAL_MODEL))
+            {
+                _configValues[QWEN3_TTS_EXTERNAL_MODEL] = "";
+                changed = true;
+            }
+
+            return changed;
         }
         
         public bool GetGoogleTranslateUseCloudApi()
@@ -482,6 +569,14 @@ namespace UGTLive
             _configValues[TTS_SERVICE] = "Google Cloud TTS";
             _configValues[GOOGLE_TTS_API_KEY] = "<your API key here>";
             _configValues[GOOGLE_TTS_VOICE] = "ja-JP-Neural2-B";
+            _configValues[QWEN3_TTS_BACKEND] = "local";
+            _configValues[QWEN3_TTS_URL] = "http://127.0.0.1";
+            _configValues[QWEN3_TTS_PORT] = "5004";
+            _configValues[QWEN3_TTS_VOICE] = "ono_anna";
+            _configValues[QWEN3_TTS_FAST_MODE] = "false";
+            _configValues[QWEN3_TTS_EXTERNAL_API_BASE] = "http://127.0.0.1:8091/v1";
+            _configValues[QWEN3_TTS_EXTERNAL_API_KEY] = "";
+            _configValues[QWEN3_TTS_EXTERNAL_MODEL] = "";
             _configValues[TTS_ENABLED] = "false";
             
             // TTS Preload defaults (TTS_SOURCE_SERVICE and TTS_TARGET_SERVICE are intentionally
@@ -508,6 +603,11 @@ namespace UGTLive
             _configValues[CHATGPT_THINKING_ENABLED] = "false";
             _configValues[GEMINI_MODEL] = "gemini-2.5-flash";
             _configValues[GEMINI_THINKING_ENABLED] = "false";
+            _configValues[GENERIC_LLM_OCR_API_BASE] = "http://127.0.0.1:1234";
+            _configValues[GENERIC_LLM_OCR_API_KEY] = "";
+            _configValues[GENERIC_LLM_OCR_MODEL] = "qwen2.5-vl-7b-instruct";
+            _configValues[GENERIC_LLM_OCR_MODE] = "OCR + Translate";
+            _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = "en";
             _configValues[BLOCK_DETECTION_SCALE] = "3.00";
             _configValues[BLOCK_DETECTION_SETTLE_TIME] = "0.15";
             _configValues[BLOCK_DETECTION_MAX_SETTLE_TIME] = "1.00";
@@ -912,6 +1012,79 @@ namespace UGTLive
             else
             {
                 Console.WriteLine($"WARNING: Invalid OCR method: {method}. Supported methods: {string.Join(", ", _supportedOcrMethods)}");
+            }
+        }
+
+        public string GetGenericLlmOcrApiBase()
+        {
+            return GetValue(GENERIC_LLM_OCR_API_BASE, "http://127.0.0.1:1234");
+        }
+
+        public void SetGenericLlmOcrApiBase(string apiBase)
+        {
+            if (!string.IsNullOrWhiteSpace(apiBase))
+            {
+                _configValues[GENERIC_LLM_OCR_API_BASE] = apiBase.Trim();
+                SaveConfig();
+            }
+        }
+
+        public string GetGenericLlmOcrApiKey()
+        {
+            return GetValue(GENERIC_LLM_OCR_API_KEY, "");
+        }
+
+        public void SetGenericLlmOcrApiKey(string apiKey)
+        {
+            _configValues[GENERIC_LLM_OCR_API_KEY] = apiKey?.Trim() ?? "";
+            SaveConfig();
+        }
+
+        public string GetGenericLlmOcrModel()
+        {
+            return GetValue(GENERIC_LLM_OCR_MODEL, "qwen2.5-vl-7b-instruct");
+        }
+
+        public void SetGenericLlmOcrModel(string model)
+        {
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                _configValues[GENERIC_LLM_OCR_MODEL] = model.Trim();
+                SaveConfig();
+            }
+        }
+
+        public string GetGenericLlmOcrMode()
+        {
+            string mode = GetValue(GENERIC_LLM_OCR_MODE, "OCR + Translate");
+            return string.Equals(mode, "OCR Only", StringComparison.OrdinalIgnoreCase)
+                ? "OCR Only"
+                : "OCR + Translate";
+        }
+
+        public void SetGenericLlmOcrMode(string mode)
+        {
+            string normalized = string.Equals(mode, "OCR Only", StringComparison.OrdinalIgnoreCase)
+                ? "OCR Only"
+                : "OCR + Translate";
+            _configValues[GENERIC_LLM_OCR_MODE] = normalized;
+            SaveConfig();
+        }
+
+        public string GetGenericLlmOcrTargetLanguage()
+        {
+            string configuredLanguage = GetValue(GENERIC_LLM_OCR_TARGET_LANGUAGE, "").Trim();
+            return string.IsNullOrWhiteSpace(configuredLanguage)
+                ? GetTargetLanguage()
+                : configuredLanguage;
+        }
+
+        public void SetGenericLlmOcrTargetLanguage(string language)
+        {
+            if (!string.IsNullOrWhiteSpace(language))
+            {
+                _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = language.Trim();
+                SaveConfig();
             }
         }
         
@@ -1735,6 +1908,19 @@ Here is the input JSON:";
         
         // Qwen3-TTS methods
 
+        public string GetQwen3TtsBackend()
+        {
+            string backend = GetValue(QWEN3_TTS_BACKEND, "local").Trim();
+            return string.Equals(backend, "openai_compatible", StringComparison.OrdinalIgnoreCase)
+                ? "openai_compatible"
+                : "local";
+        }
+
+        public bool IsQwen3TtsLocalBackend()
+        {
+            return string.Equals(GetQwen3TtsBackend(), "local", StringComparison.OrdinalIgnoreCase);
+        }
+
         public string GetQwen3TtsUrl()
         {
             return GetValue(QWEN3_TTS_URL, "http://127.0.0.1");
@@ -1748,6 +1934,26 @@ Here is the input JSON:";
         public string GetQwen3TtsVoice()
         {
             return GetValue(QWEN3_TTS_VOICE, "ono_anna");
+        }
+
+        public bool GetQwen3TtsFastMode()
+        {
+            return GetBoolValue(QWEN3_TTS_FAST_MODE, false);
+        }
+
+        public string GetQwen3TtsExternalApiBase()
+        {
+            return GetValue(QWEN3_TTS_EXTERNAL_API_BASE, "http://127.0.0.1:8091/v1");
+        }
+
+        public string GetQwen3TtsExternalApiKey()
+        {
+            return GetValue(QWEN3_TTS_EXTERNAL_API_KEY, "");
+        }
+
+        public string GetQwen3TtsExternalModel()
+        {
+            return GetValue(QWEN3_TTS_EXTERNAL_MODEL, "");
         }
 
         public void SetQwen3TtsVoice(string voice)

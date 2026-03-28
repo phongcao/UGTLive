@@ -11,7 +11,7 @@ import time
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 MAX_RETRIES = 5
 BASE_DELAY = 5
 

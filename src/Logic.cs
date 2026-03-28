@@ -108,6 +108,8 @@ namespace UGTLive
         }
         Stopwatch _translationStopwatch = new Stopwatch();
         Stopwatch _ocrProcessingStopwatch = new Stopwatch();
+        Stopwatch _ocrTranslateCycleStopwatch = new Stopwatch();
+        private readonly object _processingTimingLock = new object();
         
         // Cancellation token source for in-progress translations
         private CancellationTokenSource? _translationCancellationTokenSource;
@@ -183,12 +185,20 @@ namespace UGTLive
                     // Update status message in the UI
                     MainWindow.Instance.SetStatus("Using Google Cloud Vision (non-local, costs $)");
                 }
-                else
+                else if (ocrMethod == "Windows OCR")
                 {
                     Log("Using Windows OCR - socket connection not needed");
-                    
-                    // Update status message in the UI
                     MainWindow.Instance.SetStatus("Using Windows OCR (built-in)");
+                }
+                else if (ocrMethod == "Generic LLM OCR")
+                {
+                    Log("Using Generic LLM OCR service");
+                    MainWindow.Instance.SetStatus("Using Generic LLM OCR");
+                }
+                else
+                {
+                    Log($"Using {ocrMethod} service");
+                    MainWindow.Instance.SetStatus($"Using {ocrMethod}");
                 }
             }
             catch (Exception ex)
@@ -205,6 +215,9 @@ namespace UGTLive
             {
                 Log($"[SETTLE DEBUG] OnFinishedThings called from {callerName}:{callerLine}, bResetTranslationStatus={bResetTranslationStatus}");
             }
+
+            CompleteOcrTranslateCycle();
+
             SetWaitingForTranslationToFinish(false);
             _settlingStartTime = DateTime.MinValue;
             _settlingHash = null;
@@ -258,6 +271,8 @@ namespace UGTLive
                     Log("Translation finished - re-enabling OCR");
                 }
             }
+
+            RefreshOCRStatusDisplay();
         }
 
         public void ResetHash()
@@ -286,6 +301,14 @@ namespace UGTLive
             
             // Force new OCR analysis
             ResetHash();
+        }
+
+        public void BeginOcrTranslateCycle()
+        {
+            lock (_processingTimingLock)
+            {
+                _ocrTranslateCycleStopwatch.Restart();
+            }
         }
         
         // Check if snapshot mode is active
@@ -1097,6 +1120,10 @@ namespace UGTLive
                         _keepingTranslationVisible = false;
                     }
                     
+                    bool includesTranslations = root.TryGetProperty("includes_translations", out JsonElement includesTranslationsElement) &&
+                                                includesTranslationsElement.ValueKind == JsonValueKind.True;
+                    bool hasPreTranslatedResults = false;
+
                     // Clear existing text objects before adding new ones
                     ClearAllTextObjects();
                     
@@ -1264,10 +1291,23 @@ namespace UGTLive
                                 }
                             }
                          
+                            string translatedText = string.Empty;
+                            if (includesTranslations && autoTranslateEnabled && item.TryGetProperty("translated_text", out JsonElement translatedTextElement))
+                            {
+                                translatedText = translatedTextElement.GetString() ?? string.Empty;
+                            }
+
                             // Create text object with bounding box coordinates and colors
                             if (hasBox)
                             {
+                                int previousCount = _textObjects.Count;
                                 CreateTextObjectAtPosition(text, x, y, width, height, confidence, textOrientation, foregroundColor, backgroundColor);
+
+                                if (!string.IsNullOrWhiteSpace(translatedText) && _textObjects.Count > previousCount)
+                                {
+                                    _textObjects[_textObjects.Count - 1].TextTranslated = translatedText;
+                                    hasPreTranslatedResults = true;
+                                }
                             }
                         }
                     }
@@ -1319,6 +1359,35 @@ namespace UGTLive
                         {
                             if (MainWindow.Instance.GetTranslateEnabled())
                             {
+                                if (hasPreTranslatedResults)
+                                {
+                                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                                    {
+                                        Log("[SETTLE DEBUG] USING PRE-TRANSLATED OCR RESULTS - skipping translation service call");
+                                    }
+
+                                    _lastChangeTime = DateTime.MinValue;
+                                    _lastTranslationTime = DateTime.Now;
+                                    
+                                    // Reset "keep translation visible" flag and clean up old text objects
+                                    // BEFORE FinalizeAppliedTranslations, so RefreshOverlays renders the
+                                    // new pre-translated text instead of stale old text
+                                    if (_keepingTranslationVisible)
+                                    {
+                                        foreach (TextObject textObject in _textObjectsOld)
+                                        {
+                                            textObject.Dispose();
+                                        }
+                                        _textObjectsOld.Clear();
+                                        MonitorWindow.Instance?.ClearOverlayCache();
+                                        _keepingTranslationVisible = false;
+                                    }
+                                    
+                                    FinalizeAppliedTranslations();
+                                    OnFinishedThings(true);
+                                    return;
+                                }
+
                                 // If translation is enabled, translate the text
                                 if (!GetWaitingForTranslationToFinish())
                                 {
@@ -2089,10 +2158,16 @@ namespace UGTLive
                 
                 // Build query parameters
                 string langParam = MapLanguageForService(language);
+                string targetLangParam = MapLanguageForService(ConfigManager.Instance.GetGenericLlmOcrTargetLanguage());
                 // Note: OCR Processing Mode (char_level) removed; all services now default to natural units (Lines/Words).
                 // UniversalBlockDetector handles the rest.
                 
                 string url = $"{service.ServerUrl}:{service.Port}/process?lang={langParam}";
+
+                if (serviceName == "Generic LLM OCR")
+                {
+                    url += $"&target_lang={Uri.EscapeDataString(targetLangParam)}";
+                }
                 
                 // Add MangaOCR-specific parameters
                 if (serviceName == "MangaOCR")
@@ -2382,7 +2457,7 @@ namespace UGTLive
                     MainWindow.Instance.SetOCRCheckIsWanted(true);
                     return;
                 }
-                else if (ocrMethod == "EasyOCR" || ocrMethod == "MangaOCR" || ocrMethod == "PaddleOCR" || string.Equals(ocrMethod, "docTR", StringComparison.OrdinalIgnoreCase))
+                else if (ocrMethod == "EasyOCR" || ocrMethod == "MangaOCR" || ocrMethod == "PaddleOCR" || string.Equals(ocrMethod, "docTR", StringComparison.OrdinalIgnoreCase) || ocrMethod == "Florence2" || ocrMethod == "Generic LLM OCR")
                 {
                     // Get source language
                     string sourceLanguage = GetSourceLanguage()!;
@@ -2546,6 +2621,17 @@ namespace UGTLive
         {
             try
             {
+                // Check if we need to run on the UI thread first, before
+                // any state changes, to avoid double-executing side effects
+                if (!Application.Current.Dispatcher.CheckAccess())
+                {
+                    // Run on UI thread synchronously - must complete before caller
+                    // continues adding new text objects to avoid a race condition where
+                    // the dispatched clear runs AFTER new objects are added and destroys them
+                    Application.Current.Dispatcher.Invoke(new Action(() => ClearAllTextObjects()), DispatcherPriority.Send);
+                    return;
+                }
+
                 // Increment session ID to invalidate any pending OCR requests
                 _overlaySessionId++;
 
@@ -2557,14 +2643,6 @@ namespace UGTLive
                 
                 // Reset auto-play trigger flag to allow auto-play on next OCR
                 AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
-                
-                // Check if we need to run on the UI thread
-                if (!Application.Current.Dispatcher.CheckAccess())
-                {
-                    // Run on UI thread asynchronously to avoid blocking
-                    Application.Current.Dispatcher.BeginInvoke(new Action(() => ClearAllTextObjects()), DispatcherPriority.Send);
-                    return;
-                }
                 
                 // If keeping translation visible, only clear the internal list but NOT the visual overlays
                 if (_keepingTranslationVisible)
@@ -2624,6 +2702,15 @@ namespace UGTLive
         {
             try
             {
+                if (!ConfigManager.Instance.IsTtsEnabled())
+                {
+                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                    {
+                        Log("Logic: Source audio preloading skipped (TTS disabled)");
+                    }
+                    return;
+                }
+
                 // Check if preloading is enabled
                 if (!ConfigManager.Instance.IsTtsPreloadEnabled())
                 {
@@ -2681,6 +2768,15 @@ namespace UGTLive
         {
             try
             {
+                if (!ConfigManager.Instance.IsTtsEnabled())
+                {
+                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                    {
+                        Log("Logic: Target audio preloading skipped (TTS disabled)");
+                    }
+                    return;
+                }
+
                 // Check if preloading is enabled
                 if (!ConfigManager.Instance.IsTtsPreloadEnabled())
                 {
@@ -2858,26 +2954,26 @@ namespace UGTLive
 
 
 
-            // Update overlays
+            FinalizeAppliedTranslations();
+
+        }
+
+        private void FinalizeAppliedTranslations()
+        {
             MonitorWindow.Instance.RefreshOverlays();
             MainWindow.Instance.RefreshMainWindowOverlays();
-            
-            // Trigger target audio preloading if enabled
+
             TriggerTargetAudioPreloading();
-            
+
             string playOrder = ConfigManager.Instance.GetTtsPlayOrder();
             var sortedTextObjects = AudioPlaybackManager.SortTextObjectsByPlayOrder(_textObjects.ToList(), playOrder);
-            // Add each translated text to the ChatBox
             foreach (var textObject in sortedTextObjects)
             {
                 string originalText = textObject.Text;
-                string translatedText = textObject.TextTranslated; // Assuming translation is done in-place
+                string translatedText = textObject.TextTranslated;
 
-                // Only add to chatbox if we have both texts and translation is not empty
                 if (!string.IsNullOrEmpty(originalText) && !string.IsNullOrEmpty(translatedText))
                 {
-                    //Log($"Adding to chatbox: Original: '{originalText}', Translated: '{translatedText}'");
-                    // Add to TranslationCompleted, this will add it to the chatbox also
                     TranslationCompleted?.Invoke(this, new TranslationEventArgs
                     {
                         OriginalText = originalText,
@@ -2888,9 +2984,7 @@ namespace UGTLive
                 {
                     Log($"Skipping empty translation - Original: '{originalText}', Translated: '{translatedText}'");
                 }
-
             }
-
         }
         
         //!Process the finished translation into text blocks and the chatbox
@@ -3301,6 +3395,41 @@ namespace UGTLive
         }
         
         // Centralized OCR Status Management
+
+        public void RefreshOCRStatusDisplay()
+        {
+            if (!_isOCRActive || !MainWindow.Instance.GetIsStarted())
+            {
+                return;
+            }
+
+            double fps = CalculateAverageFPS();
+            string ocrMethod = GetCurrentOCRMethodDisplayName();
+
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                MainWindow.Instance.UpdateOCRStatusDisplay(ocrMethod, fps);
+            });
+        }
+
+        private void CompleteOcrTranslateCycle()
+        {
+            long? elapsedMilliseconds = null;
+
+            lock (_processingTimingLock)
+            {
+                if (_ocrTranslateCycleStopwatch.IsRunning)
+                {
+                    _ocrTranslateCycleStopwatch.Stop();
+                    elapsedMilliseconds = _ocrTranslateCycleStopwatch.ElapsedMilliseconds;
+                }
+            }
+
+            if (elapsedMilliseconds.HasValue)
+            {
+                TranslationStatus.SetLastOcrTranslateProcessingTime(elapsedMilliseconds.Value);
+            }
+        }
         
         // Calculate average FPS from recent samples
         private double CalculateAverageFPS()

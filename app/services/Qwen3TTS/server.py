@@ -9,7 +9,6 @@ import warnings
 from pathlib import Path
 from io import BytesIO
 from contextlib import asynccontextmanager
-from typing import Optional
 
 # Suppress noisy third-party warnings before any ML imports
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -23,13 +22,13 @@ ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=ce
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import numpy as np
 import torch
 import soundfile as sf
 
-# Suppress qwen_tts import spam (flash-attn warning, SoX check)
+# Suppress qwen_tts import spam during import.
 _real_stdout = sys.stdout
 sys.stdout = io.StringIO()
 try:
@@ -59,7 +58,11 @@ SUPPORTED_SPEAKERS = [
     "serena", "sohee", "uncle_fu", "vivian",
 ]
 
-DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+STREAMING_CHUNK_SIZE = 8
+FAST_STREAMING_CHUNK_SIZE = 4
+DEFAULT_ATTN_IMPLEMENTATION = "eager"
+ACTIVE_ATTN_IMPLEMENTATION = DEFAULT_ATTN_IMPLEMENTATION
 
 
 def normalize_audio(audio, target_peak=0.95):
@@ -70,10 +73,45 @@ def normalize_audio(audio, target_peak=0.95):
     return audio
 
 
+def audio_to_pcm16_bytes(audio):
+    """Convert float audio in [-1, 1] to little-endian PCM16 bytes."""
+    audio_array = np.asarray(audio, dtype=np.float32)
+    audio_array = np.clip(audio_array, -1.0, 1.0)
+    return (audio_array * 32767.0).astype(np.int16).tobytes()
+
+
 class TTSRequest(BaseModel):
     text: str
     voice: str = "ono_anna"
     language: str = "Auto"
+    fast_mode: bool = False
+
+
+def build_generation_kwargs(request: TTSRequest, speaker: str, language: str):
+    return {
+        "text": request.text,
+        "language": language,
+        "speaker": speaker,
+        "non_streaming_mode": True,
+    }
+
+
+def load_model_with_faster_qwen(device: str, dtype):
+    """Load model using the non-FlashAttention path supported by faster-qwen3-tts."""
+    global ACTIVE_ATTN_IMPLEMENTATION
+
+    start_time = time.time()
+    model = FasterQwen3TTS.from_pretrained(
+        DEFAULT_MODEL_ID,
+        device=device,
+        dtype=dtype,
+        attn_implementation=DEFAULT_ATTN_IMPLEMENTATION,
+    )
+    elapsed = time.time() - start_time
+    ACTIVE_ATTN_IMPLEMENTATION = DEFAULT_ATTN_IMPLEMENTATION
+    print(f"  Attention backend: {DEFAULT_ATTN_IMPLEMENTATION}")
+    print(f"  Model loaded in {elapsed:.1f}s")
+    return model
 
 
 def print_gpu_info():
@@ -120,19 +158,12 @@ def load_model():
     print(f"Loading Qwen3-TTS model: {DEFAULT_MODEL_ID}")
     print(f"  Device: {device}, Dtype: {dtype}")
     print(f"  Engine: faster-qwen3-tts (CUDA graphs)")
+    print(f"  Attention backend: {DEFAULT_ATTN_IMPLEMENTATION} (no flash-attn required)")
 
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            start_time = time.time()
-            TTS_MODEL = FasterQwen3TTS.from_pretrained(
-                DEFAULT_MODEL_ID,
-                device=device,
-                dtype=dtype,
-                attn_implementation="sdpa",
-            )
-            elapsed = time.time() - start_time
-            print(f"  Model loaded in {elapsed:.1f}s")
+            TTS_MODEL = load_model_with_faster_qwen(device, dtype)
             return TTS_MODEL
         except Exception as e:
             last_error = e
@@ -154,15 +185,8 @@ def load_model():
     print(f"  Trying offline mode (using cached model files)...")
     try:
         os.environ["HF_HUB_OFFLINE"] = "1"
-        start_time = time.time()
-        TTS_MODEL = FasterQwen3TTS.from_pretrained(
-            DEFAULT_MODEL_ID,
-            device=device,
-            dtype=dtype,
-            attn_implementation="sdpa",
-        )
-        elapsed = time.time() - start_time
-        print(f"  Model loaded from cache in {elapsed:.1f}s (offline mode)")
+        TTS_MODEL = load_model_with_faster_qwen(device, dtype)
+        print(f"  Model loaded from cache (offline mode)")
         return TTS_MODEL
     except Exception as offline_err:
         print(f"  Offline loading also failed: {offline_err}")
@@ -210,7 +234,7 @@ async def lifespan(app: FastAPI):
         print(f"[FAIL] Failed to load Qwen3-TTS model: {e}")
         import traceback
         traceback.print_exc()
-        print("Model will be loaded on first request instead.")
+        raise RuntimeError("Qwen3-TTS startup aborted: model initialization failed") from e
 
     print("[OK] Service is ready for requests!")
     print("=" * 60)
@@ -244,15 +268,14 @@ async def text_to_speech(request: TTSRequest):
     try:
         start_time = time.time()
 
-        wavs, sr = TTS_MODEL.generate_custom_voice(
-            text=request.text,
-            language=language,
-            speaker=speaker,
-        )
+        wavs, sr = TTS_MODEL.generate_custom_voice(**build_generation_kwargs(request, speaker, language))
 
         elapsed = time.time() - start_time
         text_preview = request.text[:60] + "..." if len(request.text) > 60 else request.text
-        print(f"TTS generated in {elapsed:.2f}s for voice={speaker}, text='{text_preview}'")
+        print(
+            f"TTS generated in {elapsed:.2f}s for voice={speaker}, fast_mode={request.fast_mode}, "
+            f"text='{text_preview}'"
+        )
 
         audio = normalize_audio(wavs[0])
 
@@ -271,6 +294,79 @@ async def text_to_speech(request: TTSRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/tts/stream")
+async def text_to_speech_stream(request: TTSRequest):
+    """Generate speech and stream PCM16 audio chunks as they become available."""
+    global TTS_MODEL
+
+    if TTS_MODEL is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+
+    if not request.text or not request.text.strip():
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    speaker = request.voice.lower()
+    if speaker not in SUPPORTED_SPEAKERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown voice '{request.voice}'. Available: {SUPPORTED_SPEAKERS}"
+        )
+
+    language = request.language if request.language != "Auto" else "auto"
+    sample_rate = getattr(TTS_MODEL, "sample_rate", 24000)
+    text_preview = request.text[:60] + "..." if len(request.text) > 60 else request.text
+
+    def stream_audio():
+        start_time = time.time()
+        first_chunk_elapsed = None
+        total_bytes = 0
+        chunk_count = 0
+
+        try:
+            generation_kwargs = build_generation_kwargs(request, speaker, language)
+            generation_kwargs["chunk_size"] = FAST_STREAMING_CHUNK_SIZE if request.fast_mode else STREAMING_CHUNK_SIZE
+
+            for audio_chunk, chunk_sample_rate, timing in TTS_MODEL.generate_custom_voice_streaming(**generation_kwargs):
+                chunk_bytes = audio_to_pcm16_bytes(audio_chunk)
+                if not chunk_bytes:
+                    continue
+
+                chunk_count += 1
+                total_bytes += len(chunk_bytes)
+
+                if first_chunk_elapsed is None:
+                    first_chunk_elapsed = time.time() - start_time
+                    print(
+                        f"Streaming TTS first chunk in {first_chunk_elapsed:.2f}s "
+                        f"for voice={speaker}, fast_mode={request.fast_mode}, text='{text_preview}', timing={timing}"
+                    )
+
+                sample_rate_used = int(chunk_sample_rate) if chunk_sample_rate else sample_rate
+                if sample_rate_used > 0:
+                    sample_rate = sample_rate_used
+
+                yield chunk_bytes
+
+            elapsed = time.time() - start_time
+            audio_duration = total_bytes / (sample_rate * 2) if sample_rate > 0 else 0
+            print(
+                f"Streaming TTS completed in {elapsed:.2f}s for voice={speaker}, fast_mode={request.fast_mode}, "
+                f"chunks={chunk_count}, audio={audio_duration:.2f}s, text='{text_preview}'"
+            )
+        except Exception as e:
+            print(f"Error streaming TTS: {e}")
+            raise
+
+    return StreamingResponse(
+        stream_audio(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Audio-Format": "pcm16le",
+            "X-Audio-Sample-Rate": str(sample_rate),
+        }
+    )
+
+
 @app.get("/info")
 async def get_info():
     """Get service information."""
@@ -285,6 +381,7 @@ async def get_info():
         "github_url": get_config_value(SERVICE_CONFIG, 'github_url', ''),
         "service_author": get_config_value(SERVICE_CONFIG, 'service_author', ''),
         "available_voices": SUPPORTED_SPEAKERS,
+        "active_attention_implementation": ACTIVE_ATTN_IMPLEMENTATION,
     }
     return JSONResponse(content=info)
 

@@ -441,8 +441,9 @@ namespace UGTLive
 
         private void ChatBoxWindow_SourceInitialized(object? sender, EventArgs e)
         {
-            // Apply WDA_EXCLUDEFROMCAPTURE as early as possible
-            SetExcludeFromCapture();
+            // WDA_EXCLUDEFROMCAPTURE (0x11) makes windows completely invisible on some
+            // systems/GPU drivers (e.g. NVIDIA RTX). Disabled by default.
+            // SetExcludeFromCapture();
         }
         
         private void ChatBoxWindow_Loaded(object sender, RoutedEventArgs e)

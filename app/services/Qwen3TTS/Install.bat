@@ -65,7 +65,7 @@ echo.
 
 REM -----------------------------------------------------------------
 REM Detect GPU - or use forced GPU series for testing
-REM Usage: Install.bat [nopause] [30_40|50]
+REM Usage: Install.bat [nopause] [30_40|50|60]
 REM -----------------------------------------------------------------
 if "!FORCE_GPU!"=="30_40" (
     echo FORCED GPU SERIES: 30_40 [test mode]
@@ -79,6 +79,13 @@ if "!FORCE_GPU!"=="50" (
     echo FORCED GPU SERIES: 50 >> "%LOG_FILE%"
     set "GPU_SERIES=50"
     set "GPU_NAME=Forced RTX 50 series"
+    goto :SkipGPUDetect
+)
+if "!FORCE_GPU!"=="60" (
+    echo FORCED GPU SERIES: 60 [test mode]
+    echo FORCED GPU SERIES: 60 >> "%LOG_FILE%"
+    set "GPU_SERIES=60"
+    set "GPU_NAME=Forced RTX 60 series"
     goto :SkipGPUDetect
 )
 
@@ -101,6 +108,12 @@ if not "!GPU_NAME!"=="Unknown" (
     
     REM Check for RTX 50 series
     echo !GPU_NAME! | find /i "RTX 50" >nul && set "GPU_SERIES=50"
+    
+    REM Check for RTX 60 series (Blackwell consumer)
+    echo !GPU_NAME! | find /i "RTX 60" >nul && set "GPU_SERIES=60"
+    
+    REM Check for RTX PRO series (Blackwell workstation, e.g. RTX PRO 6000)
+    echo !GPU_NAME! | find /i "RTX PRO" >nul && set "GPU_SERIES=60"
     
     REM Check for RTX 2000/3000/4000 series
     if "!GPU_SERIES!"=="UNSUPPORTED" (
@@ -125,32 +138,46 @@ echo. >> "%LOG_FILE%"
 REM -----------------------------------------------------------------
 REM Set Python version based on GPU series
 REM -----------------------------------------------------------------
-set "PYTHON_VERSION=3.10"
-if "!GPU_SERIES!"=="50" set "PYTHON_VERSION=3.11"
+set "PYTHON_VERSION=3.11"
 
 echo Python version: !PYTHON_VERSION! >> "%LOG_FILE%"
 echo GPU Series !GPU_SERIES! requires Python !PYTHON_VERSION!
 echo.
 
 REM -----------------------------------------------------------------
-REM Set Python executable path
+REM Find Python executable from system PATH
 REM -----------------------------------------------------------------
-if "!PYTHON_VERSION!"=="3.10" (
-    set "PYTHON_EXE=%UTIL_DIR%\Python310\python.exe"
-) else (
-    set "PYTHON_EXE=%UTIL_DIR%\Python311\python.exe"
-)
-
-echo Python executable: !PYTHON_EXE! >> "%LOG_FILE%"
-
-if not exist "!PYTHON_EXE!" (
+set "PYTHON_EXE=python"
+where python >nul 2>&1
+if errorlevel 1 (
     echo.
-    echo ERROR: Python !PYTHON_VERSION! not found at !PYTHON_EXE!
-    echo ERROR: Python !PYTHON_VERSION! not found >> "%LOG_FILE%"
+    echo ERROR: Python not found in PATH. Please install Python !PYTHON_VERSION! and ensure it is in your PATH.
+    echo ERROR: Python not found in PATH >> "%LOG_FILE%"
     echo.
     pause
     exit /b 1
 )
+
+REM Verify Python version is 3.12
+for /f "delims=" %%v in ('python --version 2^>^&1') do set "PY_VER_STR=%%v"
+echo Detected !PY_VER_STR! >> "%LOG_FILE%"
+echo Detected !PY_VER_STR!
+echo !PY_VER_STR! | find "3.11" >nul
+if errorlevel 1 (
+    echo.
+    echo ERROR: Python 3.11 is required but found: !PY_VER_STR!
+    echo ERROR: Wrong Python version: !PY_VER_STR! >> "%LOG_FILE%"
+    echo Please install Python 3.11 and ensure it is the default python in your PATH.
+    echo.
+    pause
+    exit /b 1
+)
+for /f "delims=" %%p in ('where python') do (
+    set "PYTHON_EXE=%%p"
+    goto :FoundPython
+)
+:FoundPython
+echo Python executable: !PYTHON_EXE! >> "%LOG_FILE%"
 
 REM -----------------------------------------------------------------
 REM Remove existing venv if present
@@ -227,6 +254,19 @@ if "!GPU_SERIES!"=="50" (
     echo.
     echo Installing for RTX 50 series with PyTorch nightly CUDA 12.8...
     echo Installing for RTX 50 series >> "%LOG_FILE%"
+    call :Install50Series
+    if errorlevel 1 (
+        echo ERROR: Install50Series failed >> "%LOG_FILE%"
+        pause
+        exit /b 1
+    )
+    goto :SetupComplete
+)
+
+if "!GPU_SERIES!"=="60" (
+    echo.
+    echo Installing for RTX 60 series with PyTorch nightly CUDA 12.8...
+    echo Installing for RTX 60 series >> "%LOG_FILE%"
     call :Install50Series
     if errorlevel 1 (
         echo ERROR: Install50Series failed >> "%LOG_FILE%"
@@ -495,6 +535,7 @@ echo This setup currently supports:
 echo   - NVIDIA RTX 3050, 3060, 3070, 3080, 3090
 echo   - NVIDIA RTX 4060, 4070, 4080, 4090
 echo   - NVIDIA RTX 5050, 5060, 5070, 5080, 5090
+echo   - NVIDIA RTX 6070, 6080, 6090
 echo.
 echo If you have one of these GPUs but it wasn't detected correctly,
 echo please ensure your NVIDIA drivers are installed and up to date.

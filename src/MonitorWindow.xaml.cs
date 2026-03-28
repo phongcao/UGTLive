@@ -436,8 +436,9 @@ namespace UGTLive
         
         private void MonitorWindow_SourceInitialized(object? sender, EventArgs e)
         {
-            // Apply WDA_EXCLUDEFROMCAPTURE as early as possible (right after HWND creation)
-            SetExcludeFromCapture();
+            // WDA_EXCLUDEFROMCAPTURE (0x11) makes windows completely invisible on some
+            // systems/GPU drivers (e.g. NVIDIA RTX). Disabled by default.
+            // SetExcludeFromCapture();
         }
         
         private void ImageScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
@@ -1190,7 +1191,8 @@ namespace UGTLive
                         // Add speaker icon - show if preload is enabled
                         bool isTtsPreloadEnabled = ConfigManager.Instance.IsTtsPreloadEnabled();
                         string preloadMode = ConfigManager.Instance.GetTtsPreloadMode();
-                        bool preloadEnabled = isTtsPreloadEnabled && preloadMode != "Off";
+                        bool preloadEnabled = ConfigManager.Instance.IsTtsEnabled()
+                            && isTtsPreloadEnabled && preloadMode != "Off";
                         
                         if (preloadEnabled)
                         {
@@ -2480,7 +2482,8 @@ namespace UGTLive
                     // Add speaker icon FIRST - as sibling to text-content, show if preload is enabled
                     bool isTtsPreloadEnabled = ConfigManager.Instance.IsTtsPreloadEnabled();
                     string preloadMode = ConfigManager.Instance.GetTtsPreloadMode();
-                    bool preloadEnabled = isTtsPreloadEnabled && preloadMode != "Off";
+                    bool preloadEnabled = ConfigManager.Instance.IsTtsEnabled()
+                        && isTtsPreloadEnabled && preloadMode != "Off";
                     
                     if (preloadEnabled)
                     {

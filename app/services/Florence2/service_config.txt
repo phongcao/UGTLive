@@ -1,0 +1,9 @@
+description|A vision foundation model from Microsoft for OCR and text detection. Supports multiple languages with GPU acceleration. Uses the Florence-2-large model.
+github_url|https://huggingface.co/microsoft/Florence-2-large|
+service_author|Seth A. Robinson|
+service_name|Florence2|
+venv_name|ugt_florence2|
+port|5006|
+server_url|http://127.0.0.1|
+local_only|true|
+service_install_version|1|

@@ -168,6 +168,15 @@ namespace UGTLive
         
         public async Task PreloadSourceAudioAsync(List<TextObject> textObjects)
         {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    Console.WriteLine("AudioPreloadService: Source preload skipped because TTS is disabled");
+                }
+                return;
+            }
+
             if (textObjects == null || textObjects.Count == 0)
             {
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
@@ -213,6 +222,13 @@ namespace UGTLive
             if (ConfigManager.Instance.GetLogExtraDebugStuff())
             {
                 Console.WriteLine($"AudioPreloadService: Using service={service}, voice={voice}");
+            }
+
+            if (ShouldUseLocalQwenStreaming(service))
+            {
+                Console.WriteLine("AudioPreloadService: Skipping source audio file preload for local Qwen3-TTS; play-all/autoplay will use live streaming.");
+                CheckAndTriggerAutoPlay();
+                return;
             }
             
             // Preload audio for each text object
@@ -283,6 +299,15 @@ namespace UGTLive
         
         public async Task PreloadTargetAudioAsync(List<TextObject> textObjects)
         {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    Console.WriteLine("AudioPreloadService: Target preload skipped because TTS is disabled");
+                }
+                return;
+            }
+
             if (textObjects == null || textObjects.Count == 0)
             {
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
@@ -328,6 +353,13 @@ namespace UGTLive
             if (ConfigManager.Instance.GetLogExtraDebugStuff())
             {
                 Console.WriteLine($"AudioPreloadService: Using service={service}, voice={voice}");
+            }
+
+            if (ShouldUseLocalQwenStreaming(service))
+            {
+                Console.WriteLine("AudioPreloadService: Skipping target audio file preload for local Qwen3-TTS; play-all/autoplay will use live streaming.");
+                CheckAndTriggerAutoPlay();
+                return;
             }
             
             // Preload audio for each text object
@@ -400,8 +432,13 @@ namespace UGTLive
         {
             try
             {
+                if (!ConfigManager.Instance.IsTtsEnabled())
+                {
+                    return;
+                }
+
                 // Generate hash for caching
-                string textHash = ComputeTextHash(text);
+                string textHash = ComputeTextHash(service, voice, text);
                 bool alwaysGenerateNew = ConfigManager.Instance.GetTtsAlwaysGenerateNewAudio();
                 
                 // Check cache first (in-memory and disk), unless always-generate is enabled
@@ -651,17 +688,39 @@ namespace UGTLive
             }
         }
         
-        private string ComputeTextHash(string text)
+        private string ComputeTextHash(string service, string voice, string text)
         {
             using (SHA256 sha256 = SHA256.Create())
             {
-                byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(text));
+                string cacheVariant = GetServiceCacheVariant(service);
+                string cacheKey = $"{service}\n{cacheVariant}\n{voice}\n{text}";
+                byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(cacheKey));
                 return Convert.ToBase64String(hashBytes);
             }
+        }
+
+        private string GetServiceCacheVariant(string service)
+        {
+            if (service == "Qwen3-TTS")
+            {
+                if (!TtsServiceFactory.IsLocalService(service))
+                {
+                    return "external_openai_compatible";
+                }
+
+                return ConfigManager.Instance.GetQwen3TtsFastMode() ? "local_fast" : "local";
+            }
+
+            return "default";
         }
         
         private void CheckAndTriggerAutoPlay()
         {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                return;
+            }
+
             // This will be called after each audio file is ready
             // Check if auto-play is enabled and all requested audio is ready
             if (!ConfigManager.Instance.IsTtsAutoPlayAllEnabled())
@@ -673,6 +732,15 @@ namespace UGTLive
             string preloadMode = ConfigManager.Instance.GetTtsPreloadMode();
             if (preloadMode == "Off")
             {
+                return;
+            }
+
+            if (ShouldUseLocalQwenStreamingForPreloadMode(preloadMode))
+            {
+                Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    AudioPlaybackManager.Instance?.CheckAndTriggerAutoPlay();
+                });
                 return;
             }
             
@@ -714,6 +782,26 @@ namespace UGTLive
                     AudioPlaybackManager.Instance?.CheckAndTriggerAutoPlay();
                 });
             }
+        }
+
+        private bool ShouldUseLocalQwenStreamingForPreloadMode(string preloadMode)
+        {
+            string? service = preloadMode switch
+            {
+                "Source language" => ConfigManager.Instance.GetTtsSourceService(),
+                "Target language" => ConfigManager.Instance.GetTtsTargetService(),
+                "Both source and target languages" => ConfigManager.Instance.GetMainWindowOverlayMode() == "Translated"
+                    ? ConfigManager.Instance.GetTtsTargetService()
+                    : ConfigManager.Instance.GetTtsSourceService(),
+                _ => null,
+            };
+
+            return service != null && ShouldUseLocalQwenStreaming(service);
+        }
+
+        private bool ShouldUseLocalQwenStreaming(string service)
+        {
+            return service == "Qwen3-TTS" && TtsServiceFactory.IsLocalService(service);
         }
         
         public void CancelAllPreloads()
@@ -813,7 +901,7 @@ namespace UGTLive
             switch (service)
             {
                 case "Qwen3-TTS":
-                    if (!Qwen3TtsService.AvailableVoices.ContainsValue(voice))
+                    if (TtsServiceFactory.IsLocalService(service) && !Qwen3TtsService.AvailableVoices.ContainsValue(voice))
                     {
                         string fallback = ConfigManager.Instance.GetQwen3TtsVoice();
                         Console.WriteLine($"AudioPreloadService: Voice '{voice}' is not valid for Qwen3-TTS, using '{fallback}' instead");

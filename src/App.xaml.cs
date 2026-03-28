@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -13,6 +14,8 @@ namespace UGTLive;
 public partial class App : Application
 {
     private MainWindow? _mainWindow;
+    private static Mutex? _singleInstanceMutex;
+    private const string SingleInstanceMutexName = "UGTLive_SingleInstanceMutex";
     
     // DPI awareness APIs - needed to prevent Windows from virtualizing DPI for this app
     [DllImport("user32.dll", SetLastError = true)]
@@ -23,6 +26,20 @@ public partial class App : Application
     
     protected override void OnStartup(StartupEventArgs e)
     {
+        // Prevent multiple app instances from competing for overlay/tool windows.
+        bool createdNew;
+        _singleInstanceMutex = new Mutex(true, SingleInstanceMutexName, out createdNew);
+        if (!createdNew)
+        {
+            System.Windows.MessageBox.Show(
+                "UGTLive is already running. Please close the existing instance first.",
+                "UGTLive Already Running",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            Shutdown();
+            return;
+        }
+
         // Set DPI awareness BEFORE any windows are created
         // This prevents Windows from virtualizing DPI when display scale changes
         try
@@ -40,7 +57,8 @@ public partial class App : Application
         try
         {
             string logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "startup_log.txt");
-            System.IO.File.AppendAllText(logPath, $"\n=== App Starting at {DateTime.Now} ===\n");
+            int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+            System.IO.File.AppendAllText(logPath, $"\n=== App Starting at {DateTime.Now} (PID {pid}) ===\n");
         }
         catch { }
         
@@ -83,6 +101,8 @@ public partial class App : Application
                         {
                             // Show main window after dialog closes
                             _mainWindow?.Show();
+                            _mainWindow?.EnableStartupSafePassthrough();
+                            _mainWindow?.EnsureCaptureFrameVisibleOnStartup();
                             
                             // Attach key handler to other windows once main window is shown
                             AttachKeyHandlersToAllWindows();
@@ -108,6 +128,8 @@ public partial class App : Application
                     if (!Current.Dispatcher.HasShutdownStarted && !Current.Dispatcher.HasShutdownFinished)
                     {
                         _mainWindow?.Show();
+                        _mainWindow?.EnableStartupSafePassthrough();
+                        _mainWindow?.EnsureCaptureFrameVisibleOnStartup();
                         AttachKeyHandlersToAllWindows();
                     }
                 }
@@ -171,6 +193,13 @@ public partial class App : Application
     
     protected override void OnExit(ExitEventArgs e)
     {
+        if (_singleInstanceMutex != null)
+        {
+            _singleInstanceMutex.ReleaseMutex();
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+        }
+
         // Cleanup log window if it exists
         LogWindow.Instance?.cleanup();
         
