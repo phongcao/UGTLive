@@ -23,6 +23,11 @@ namespace UGTLive
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
+
+        private static readonly HttpClient _streamingHttpClient = new HttpClient()
+        {
+            Timeout = TimeSpan.FromSeconds(180)
+        };
         
         private List<TextObject> _textObjects;
         private List<TextObject> _textObjectsOld;
@@ -2270,6 +2275,269 @@ namespace UGTLive
                 return null;
             }
         }
+
+        /// <summary>
+        /// Streaming OCR path for Generic LLM OCR. Reads SSE events from /process_stream
+        /// and incrementally creates TextObjects + overlay divs as each text region arrives.
+        /// Returns true if streaming completed successfully, false otherwise.
+        /// </summary>
+        private async Task<bool> ProcessImageStreamingAsync(byte[] imageBytes, string serviceName, string language)
+        {
+            var service = PythonServicesManager.Instance.GetServiceByName(serviceName);
+            if (service == null || !service.IsRunning)
+            {
+                Log($"Streaming: Service {serviceName} not available");
+                return false;
+            }
+
+            string langParam = MapLanguageForService(language);
+            string targetLangParam = MapLanguageForService(ConfigManager.Instance.GetGenericLlmOcrTargetLanguage());
+            string url = $"{service.ServerUrl}:{service.Port}/process_stream?lang={langParam}&target_lang={Uri.EscapeDataString(targetLangParam)}";
+
+            try
+            {
+                var content = new ByteArrayContent(imageBytes);
+                content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+
+                using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                request.Content = content;
+                request.Headers.ConnectionClose = false;
+
+                // Use ResponseHeadersRead so we can start reading the stream immediately
+                var response = await _streamingHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Log($"Streaming HTTP request failed: {response.StatusCode}");
+                    service.MarkAsNotRunning();
+                    return false;
+                }
+
+                // First pass: collect all text objects from the stream without rendering
+                // so we can hash them and skip if content hasn't changed
+                bool includesTranslations = false;
+                bool autoTranslateEnabled = MainWindow.Instance.GetTranslateEnabled();
+                long sessionId = _overlaySessionId;
+
+                var streamedTextData = new List<(string text, double x, double y, double width, double height,
+                    string orientation, Color? fg, Color? bg, string translated)>();
+
+                using var stream = await response.Content.ReadAsStreamAsync();
+                using var reader = new StreamReader(stream);
+
+                string? line;
+                while ((line = await reader.ReadLineAsync()) != null)
+                {
+                    // Check for session change (user moved to a new capture area)
+                    if (sessionId != _overlaySessionId)
+                    {
+                        Log("Streaming: Session changed, aborting stream");
+                        return false;
+                    }
+
+                    if (!line.StartsWith("data: "))
+                        continue;
+
+                    string jsonPart = line.Substring(6);
+                    if (string.IsNullOrWhiteSpace(jsonPart))
+                        continue;
+
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(jsonPart);
+                        var root = doc.RootElement;
+
+                        if (!root.TryGetProperty("event", out var eventProp))
+                            continue;
+
+                        string eventType = eventProp.GetString() ?? "";
+
+                        if (eventType == "text_object")
+                        {
+                            if (!root.TryGetProperty("data", out var dataElement))
+                                continue;
+
+                            // Extract text object fields
+                            string text = dataElement.TryGetProperty("text", out var textEl) ? textEl.GetString() ?? "" : "";
+                            if (string.IsNullOrWhiteSpace(text))
+                                continue;
+
+                            double x = dataElement.TryGetProperty("x", out var xEl) ? xEl.GetDouble() : 0;
+                            double y = dataElement.TryGetProperty("y", out var yEl) ? yEl.GetDouble() : 0;
+                            double width = dataElement.TryGetProperty("width", out var wEl) ? wEl.GetDouble() : 0;
+                            double height = dataElement.TryGetProperty("height", out var hEl) ? hEl.GetDouble() : 0;
+
+                            string textOrientation = "horizontal";
+                            if (dataElement.TryGetProperty("text_orientation", out var orientEl))
+                                textOrientation = orientEl.GetString() ?? "horizontal";
+
+                            // Apply text area expansion
+                            int expansionWidth = ConfigManager.Instance.GetMonitorTextAreaExpansionWidth();
+                            int expansionHeight = ConfigManager.Instance.GetMonitorTextAreaExpansionHeight();
+                            x -= expansionWidth / 2.0;
+                            width += expansionWidth;
+                            y -= expansionHeight / 2.0;
+                            height += expansionHeight;
+
+                            // Extract colors
+                            Color? foregroundColor = null;
+                            Color? backgroundColor = null;
+                            if (dataElement.TryGetProperty("foreground_color", out var fgEl))
+                                foregroundColor = ParseColorFromJson(fgEl, isBackground: false);
+                            if (dataElement.TryGetProperty("background_color", out var bgEl))
+                                backgroundColor = ParseColorFromJson(bgEl, isBackground: true);
+
+                            // Extract pre-translated text
+                            string translatedText = "";
+                            if (autoTranslateEnabled && dataElement.TryGetProperty("translated_text", out var transEl))
+                            {
+                                translatedText = transEl.GetString() ?? "";
+                                if (!string.IsNullOrEmpty(translatedText))
+                                    includesTranslations = true;
+                            }
+
+                            // Collect text data for hash comparison (render after stream completes)
+                            streamedTextData.Add((text, x, y, width, height, textOrientation,
+                                foregroundColor, backgroundColor, translatedText));
+                        }
+                        else if (eventType == "stream_end")
+                        {
+                            double processingTime = root.TryGetProperty("processing_time", out var ptEl) ? ptEl.GetDouble() : 0;
+                            Log($"Streaming OCR complete: {streamedTextData.Count} text objects in {processingTime:F1}s");
+                        }
+                        else if (eventType == "error")
+                        {
+                            string errorMsg = root.TryGetProperty("message", out var msgEl) ? msgEl.GetString() ?? "Unknown" : "Unknown";
+                            Log($"Streaming OCR error: {errorMsg}");
+                            return false;
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        Log($"Streaming: Failed to parse SSE chunk: {ex.Message}");
+                    }
+                }
+
+                // Generate content hash from streamed text using the same normalization as the non-streaming path
+                var hashBuilder = new StringBuilder();
+                foreach (var item in streamedTextData)
+                {
+                    foreach (char c in item.text)
+                    {
+                        if (g_charsToStripFromHash.Contains(c))
+                            continue;
+                        hashBuilder.Append(g_hashNormalizationMap.TryGetValue(c, out char nc) ? nc : c);
+                    }
+                }
+                string streamHash = hashBuilder.ToString();
+
+                if (streamHash == _lastOcrHash && !_lastOcrHash.StartsWith("RESET_"))
+                {
+                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                        Log($"Streaming: Content hash unchanged, skipping render. Hash: {streamHash.Substring(0, Math.Min(25, streamHash.Length))}...");
+                    return true;
+                }
+
+                _lastOcrHash = streamHash;
+
+                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                    Log($"Streaming: New content hash: {streamHash.Substring(0, Math.Min(25, streamHash.Length))}..., rendering {streamedTextData.Count} text objects");
+
+                // Content has changed — clear old objects and render new ones
+                ClearAllTextObjects();
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    MonitorWindow.Instance.ClearStreamingOverlays();
+                    MonitorWindow.Instance.ClearOverlayCache();
+                });
+
+                foreach (var item in streamedTextData)
+                {
+                    int previousCount = _textObjects.Count;
+                    CreateTextObjectAtPosition(item.text, item.x, item.y, item.width, item.height,
+                        1.0, item.orientation, item.fg, item.bg);
+
+                    if (!string.IsNullOrWhiteSpace(item.translated) && _textObjects.Count > previousCount)
+                        _textObjects[_textObjects.Count - 1].TextTranslated = item.translated;
+
+                    // Incrementally inject overlay into WebView
+                    if (_textObjects.Count > previousCount)
+                    {
+                        var newTextObj = _textObjects[_textObjects.Count - 1];
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            MonitorWindow.Instance.AddStreamingOverlay(newTextObj);
+                        });
+                    }
+                }
+
+                // Full overlay refresh to normalize state (HTML cache, audio icons, etc.)
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    MonitorWindow.Instance.ClearOverlayCache();
+                    MonitorWindow.Instance.RefreshOverlays();
+                    MainWindow.Instance.RefreshMainWindowOverlays();
+                });
+
+                // Trigger audio preloading
+                TriggerSourceAudioPreloading();
+
+                // Handle translation / chat history
+                if (_textObjects.Count > 0)
+                {
+                    StringBuilder detectedText = new StringBuilder();
+                    foreach (var textObject in _textObjects)
+                        detectedText.AppendLine(textObject.Text);
+
+                    string combinedText = detectedText.ToString().Trim();
+                    if (!string.IsNullOrEmpty(combinedText))
+                    {
+                        if (autoTranslateEnabled)
+                        {
+                            if (includesTranslations)
+                            {
+                                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                                    Log("Streaming: Using pre-translated results from LLM");
+
+                                _lastChangeTime = DateTime.MinValue;
+                                _lastTranslationTime = DateTime.Now;
+
+                                if (_keepingTranslationVisible)
+                                {
+                                    foreach (TextObject t in _textObjectsOld)
+                                        t.Dispose();
+                                    _textObjectsOld.Clear();
+                                    MonitorWindow.Instance?.ClearOverlayCache();
+                                    _keepingTranslationVisible = false;
+                                }
+
+                                FinalizeAppliedTranslations();
+                            }
+                            else if (!GetWaitingForTranslationToFinish())
+                            {
+                                _lastChangeTime = DateTime.MinValue;
+                                _ = TranslateTextObjectsAsync();
+                            }
+                        }
+                        else
+                        {
+                            _lastChangeTime = DateTime.MinValue;
+                            MainWindow.Instance.AddTranslationToHistory(combinedText, "");
+                            if (ChatBoxWindow.Instance != null)
+                                ChatBoxWindow.Instance.OnTranslationWasAdded(combinedText, "");
+                        }
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Streaming OCR error: {ex.Message}");
+                service.MarkAsNotRunning();
+                return false;
+            }
+        }
         
         /// <summary>
         /// Maps internal language codes to service-specific language codes.
@@ -2466,17 +2734,47 @@ namespace UGTLive
                     {
                         Log($"Processing {imageBytes.Length} bytes with {ocrMethod} HTTP service, language: {sourceLanguage}");
                     }
+
+                    // Check if streaming is enabled for Generic LLM OCR
+                    if (ocrMethod == "Generic LLM OCR" && ConfigManager.Instance.IsGenericLlmOcrStreamingEnabled())
+                    {
+                        long currentSessionId = _overlaySessionId;
+                        Log("Using streaming OCR path for Generic LLM OCR");
+                        bool streamSuccess = await ProcessImageStreamingAsync(imageBytes, ocrMethod, sourceLanguage);
+
+                        if (currentSessionId != _overlaySessionId)
+                        {
+                            ClearCurrentProcessingBitmap();
+                            MainWindow.Instance.SetOCRCheckIsWanted(true);
+                            NotifyOCRCompleted();
+                            return;
+                        }
+
+                        if (!streamSuccess)
+                        {
+                            Log("Streaming OCR failed, falling back to non-streaming path");
+                            // Fall through to non-streaming path below
+                        }
+                        else
+                        {
+                            ClearCurrentProcessingBitmap();
+                            MainWindow.Instance.SetOCRCheckIsWanted(true);
+                            NotifyOCRCompleted();
+                            OnFinishedThings(true);
+                            return;
+                        }
+                    }
                     
                     // Process with HTTP service - returns JSON directly
-                    long currentSessionId = _overlaySessionId;
+                    long currentSessionId2 = _overlaySessionId;
                     var jsonResponse = await ProcessImageWithHttpServiceAsync(imageBytes, ocrMethod, sourceLanguage);
                     
                     // Check if session is still valid
-                    if (currentSessionId != _overlaySessionId)
+                    if (currentSessionId2 != _overlaySessionId)
                     {
                         if (ConfigManager.Instance.GetLogExtraDebugStuff())
                         {
-                            Log($"Ignoring stale OCR result from {ocrMethod} (Session ID mismatch: {currentSessionId} vs {_overlaySessionId})");
+                            Log($"Ignoring stale OCR result from {ocrMethod} (Session ID mismatch: {currentSessionId2} vs {_overlaySessionId})");
                         }
                         ClearCurrentProcessingBitmap();
                         return;

@@ -741,6 +741,127 @@ namespace UGTLive
             Console.WriteLine("[MONITOR] ClearOverlayCache called - forcing HTML regeneration");
             _lastOverlayHtml = string.Empty;
         }
+
+        /// <summary>
+        /// Injects or replaces a single overlay div via JavaScript without a full page reload.
+        /// Called from the streaming OCR path to incrementally add overlays as they arrive.
+        /// </summary>
+        public void AddStreamingOverlay(TextObject textObj)
+        {
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+                return;
+
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => AddStreamingOverlay(textObj), DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                bool isTranslated = false;
+                string textToShow = textObj.Text;
+                string displayOrientation = textObj.TextOrientation;
+
+                if (_currentOverlayMode == OverlayMode.Translated && !string.IsNullOrEmpty(textObj.TextTranslated))
+                {
+                    textToShow = textObj.TextTranslated;
+                    isTranslated = true;
+                    if (textObj.TextOrientation == "vertical")
+                    {
+                        string targetLang = ConfigManager.Instance.GetTargetLanguage().ToLower();
+                        if (!IsVerticalSupportedLanguage(targetLang))
+                            displayOrientation = "horizontal";
+                    }
+                }
+
+                Color bgColor;
+                if (ConfigManager.Instance.IsMonitorOverrideBgColorEnabled())
+                    bgColor = ConfigManager.Instance.GetMonitorOverrideBgColor();
+                else
+                    bgColor = textObj.BackgroundColor?.Color ?? Colors.Black;
+
+                double bgOpacity = ConfigManager.Instance.GetMonitorBgOpacity();
+                byte alphaValue = (byte)(bgOpacity * 255);
+                bgColor = Color.FromArgb(alphaValue, bgColor.R, bgColor.G, bgColor.B);
+
+                Color textColor;
+                if (ConfigManager.Instance.IsMonitorOverrideFontColorEnabled())
+                    textColor = ConfigManager.Instance.GetMonitorOverrideFontColor();
+                else
+                    textColor = textObj.TextColor?.Color ?? Colors.White;
+
+                string fontFamily = isTranslated
+                    ? ConfigManager.Instance.GetTargetLanguageFontFamily()
+                    : ConfigManager.Instance.GetSourceLanguageFontFamily();
+                bool isBold = isTranslated
+                    ? ConfigManager.Instance.GetTargetLanguageFontBold()
+                    : ConfigManager.Instance.GetSourceLanguageFontBold();
+
+                string encodedText = System.Web.HttpUtility.HtmlEncode(textToShow.Trim())
+                    .Replace("\r\n", "<br>")
+                    .Replace("\r", "<br>")
+                    .Replace("\n", "<br>");
+
+                double left = textObj.X;
+                double top = textObj.Y;
+                double width = textObj.Width;
+                double height = textObj.Height;
+                double initialFontSize = Math.Max(8, Math.Min(128, height * 0.7));
+
+                int borderRadius = ConfigManager.Instance.GetMonitorTextOverlayBorderRadius();
+                string rgbaString = $"rgba({bgColor.R},{bgColor.G},{bgColor.B},{bgColor.A / 255.0:F3})";
+                string styleAttr = $"left: {left}px; top: {top}px; width: {width}px; height: {height}px; " +
+                    $"box-shadow: inset 0 0 0 1000px {rgbaString}; " +
+                    $"background-color: transparent; " +
+                    $"color: rgb({textColor.R},{textColor.G},{textColor.B}); " +
+                    $"font-family: {string.Join(", ", fontFamily.Split(',').Select(f => $"\"{f.Trim()}\""))}; " +
+                    $"font-weight: {(isBold ? "bold" : "normal")}; " +
+                    $"font-size: {initialFontSize}px; " +
+                    $"border-radius: {borderRadius}px;";
+
+                string cssClass = displayOrientation == "vertical" ? "text-overlay vertical-text" : "text-overlay";
+
+                // Use JsonSerializer.Serialize for proper Unicode escaping (à etc.)
+                // This ensures Vietnamese/CJK diacritics survive the ExecuteScriptAsync pipeline
+                string jsId = System.Text.Json.JsonSerializer.Serialize(textObj.ID);
+                string jsCssClass = System.Text.Json.JsonSerializer.Serialize(cssClass);
+                string jsStyle = System.Text.Json.JsonSerializer.Serialize(styleAttr);
+                string jsText = System.Text.Json.JsonSerializer.Serialize(encodedText);
+
+                string script = $"addStreamingOverlay({jsId}, {jsCssClass}, {jsStyle}, {jsText});";
+                textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error adding streaming overlay: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Clears all overlays from the WebView by removing child elements from scroll-container.
+        /// Used before a new streaming OCR session starts.
+        /// </summary>
+        public void ClearStreamingOverlays()
+        {
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+                return;
+
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => ClearStreamingOverlays(), DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                textOverlayWebView.CoreWebView2.ExecuteScriptAsync("clearAllStreamingOverlays();");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error clearing streaming overlays: {ex.Message}");
+            }
+        }
         
         private void UpdateOverlayWebView()
         {
@@ -1067,6 +1188,30 @@ namespace UGTLive
             html.AppendLine("  if (container) {");
             html.AppendLine("    container.style.transform = 'translate(' + offsetX + 'px, ' + offsetY + 'px) scale(' + scaleFactor + ')';");
             html.AppendLine("  }");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function addStreamingOverlay(id, cssClass, styleAttr, encodedText) {");
+            html.AppendLine("  const container = document.getElementById('scroll-container');");
+            html.AppendLine("  if (!container) return;");
+            html.AppendLine("  // Remove existing overlay with same id if present");
+            html.AppendLine("  const existing = document.getElementById('overlay-' + id);");
+            html.AppendLine("  if (existing) existing.remove();");
+            html.AppendLine("  const div = document.createElement('div');");
+            html.AppendLine("  div.id = 'overlay-' + id;");
+            html.AppendLine("  div.className = cssClass;");
+            html.AppendLine("  div.setAttribute('style', styleAttr);");
+            html.AppendLine("  const span = document.createElement('span');");
+            html.AppendLine("  span.className = 'text-content';");
+            html.AppendLine("  span.innerHTML = encodedText;");
+            html.AppendLine("  div.appendChild(span);");
+            html.AppendLine("  container.appendChild(div);");
+            html.AppendLine("  fitTextToBox(span, div);");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function clearAllStreamingOverlays() {");
+            html.AppendLine("  const container = document.getElementById('scroll-container');");
+            html.AppendLine("  if (!container) return;");
+            html.AppendLine("  while (container.firstChild) container.removeChild(container.firstChild);");
             html.AppendLine("}");
             html.AppendLine("</script>");
             html.AppendLine("</head>");

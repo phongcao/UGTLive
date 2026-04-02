@@ -27,7 +27,7 @@ if sys.platform.startswith("win") and hasattr(asyncio, "WindowsSelectorEventLoop
 import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 
 shared_dir = Path(__file__).parent.parent / "shared"
@@ -649,6 +649,208 @@ def analyze_color_sync(image_bytes: bytes) -> Dict:
     return {"status": "success", "color_info": color_info}
 
 
+def process_single_text_object(
+    match: re.Match,
+    image: Image.Image,
+    mode: str,
+    bbox_image_width: int,
+    bbox_image_height: int,
+) -> Optional[Dict]:
+    """Parse a single TRANSLATION_PATTERN match into a text object dict (or None)."""
+    llm_text = (match.group("text") or "").replace("</s>", "").strip()
+    translated_text = (match.group("translated") or "").replace("</s>", "").strip()
+    parsed_bbox = parse_bbox_values(match.group("bbox"), bbox_image_width, bbox_image_height)
+    bbox = None
+    if parsed_bbox is not None:
+        bbox = remap_bbox_to_source(
+            parsed_bbox,
+            bbox_image_width,
+            bbox_image_height,
+            image.width,
+            image.height,
+        )
+
+    if not llm_text or bbox is None:
+        return None
+
+    if is_no_text_response(llm_text) or (translated_text and is_no_text_response(translated_text)):
+        return None
+
+    text_value = llm_text
+    translated_value = ""
+
+    if mode == MODE_OCR_TRANSLATE:
+        translated_value = translated_text or llm_text
+        text_value = translated_value
+
+    x1, y1, x2, y2 = bbox
+    vertices = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+    text_obj: Dict = {
+        "text": text_value,
+        "x": x1,
+        "y": y1,
+        "width": x2 - x1,
+        "height": y2 - y1,
+        "vertices": vertices,
+        "confidence": None,
+        "text_orientation": "horizontal",
+    }
+
+    if translated_value:
+        text_obj["translated_text"] = translated_value
+
+    try:
+        color_data = extract_foreground_background_colors(image, vertices)
+        if color_data:
+            attach_color_info(text_obj, color_data)
+    except Exception as exc:
+        LOGGER.warning("Color extraction failed: %s", exc)
+
+    return text_obj
+
+
+def query_llm_streaming(
+    image_bytes: bytes,
+    width: int,
+    height: int,
+    runtime_config: Dict[str, str],
+    source_lang: str,
+    target_lang: str,
+):
+    """Generator that yields (accumulated_text, model, mode) after each SSE chunk."""
+    api_base = runtime_config.get("generic_llm_ocr_api_base", DEFAULT_API_BASE)
+    api_key = runtime_config.get("generic_llm_ocr_api_key", "")
+    model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
+    mode = normalize_mode(runtime_config.get("generic_llm_ocr_mode", DEFAULT_MODE))
+
+    endpoint = build_endpoint(api_base)
+    prompt = build_prompt(mode, width, height, source_lang, target_lang)
+
+    image_data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 4096,
+        "stream": True,
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if api_key and not api_key.startswith("<your"):
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    request_started = time.time()
+    LOGGER.info(
+        "LLM streaming request start model=%s mode=%s endpoint=%s image=%sx%s",
+        model, mode, endpoint, width, height,
+    )
+
+    response = requests.post(endpoint, json=payload, headers=headers, timeout=180, stream=True)
+    response.raise_for_status()
+    response.encoding = "utf-8"
+
+    accumulated = ""
+
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if not raw_line or not raw_line.startswith("data: "):
+            continue
+
+        json_part = raw_line[6:]
+        if json_part.strip() == "[DONE]":
+            break
+
+        try:
+            chunk = __import__("json").loads(json_part)
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                accumulated += content
+                yield accumulated, model, mode
+        except Exception:
+            continue
+
+    LOGGER.info(
+        "LLM streaming request complete model=%s mode=%s duration_ms=%.1f response_chars=%s",
+        model, mode, (time.time() - request_started) * 1000.0, len(accumulated),
+    )
+
+
+def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
+    """Generator that yields SSE event strings for each new text object detected."""
+    import json as _json
+
+    runtime_config = load_runtime_settings()
+
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    save_debug_request_image(image, source_lang)
+    llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
+    if llm_image.size != image.size:
+        save_debug_request_image(llm_image, source_lang, prefix="request_llm")
+
+    start_time = time.time()
+    mode = normalize_mode(runtime_config.get("generic_llm_ocr_mode", DEFAULT_MODE))
+    model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
+
+    emitted_count = 0
+
+    # Yield a header event so the client knows streaming has started
+    header = {
+        "event": "stream_start",
+        "mode": mode,
+        "model": model,
+        "language": source_lang,
+    }
+    yield f"data: {_json.dumps(header)}\n\n"
+
+    try:
+        for accumulated_text, model, mode in query_llm_streaming(
+            llm_image_bytes,
+            llm_image.width,
+            llm_image.height,
+            runtime_config,
+            source_lang,
+            target_lang,
+        ):
+            # Try to parse any new complete lines from the accumulated text
+            matches = list(TRANSLATION_PATTERN.finditer(accumulated_text))
+            new_matches = matches[emitted_count:]
+            for match in new_matches:
+                text_obj = process_single_text_object(
+                    match, image, mode, llm_image.width, llm_image.height
+                )
+                if text_obj is not None:
+                    event_data = {"event": "text_object", "data": text_obj}
+                    yield f"data: {_json.dumps(event_data)}\n\n"
+                emitted_count = len(matches)
+    except Exception as exc:
+        LOGGER.exception("Streaming LLM request failed")
+        error_data = {"event": "error", "message": str(exc)}
+        yield f"data: {_json.dumps(error_data)}\n\n"
+        return
+
+    # Final event
+    done_data = {
+        "event": "stream_end",
+        "processing_time": time.time() - start_time,
+        "total_text_objects": emitted_count,
+        "includes_translations": mode == MODE_OCR_TRANSLATE,
+    }
+    yield f"data: {_json.dumps(done_data)}\n\n"
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     asyncio.get_running_loop().set_exception_handler(log_asyncio_exception)
@@ -751,6 +953,53 @@ async def analyze_color(request: Request):
         return JSONResponse(
             status_code=500,
             content={"status": "error", "message": str(exc), "error_type": type(exc).__name__},
+        )
+
+
+@app.post("/process_stream")
+async def process_image_stream(request: Request):
+    try:
+        runtime_config = load_runtime_settings()
+        source_lang = request.query_params.get("lang", runtime_config.get("source_language", "ja"))
+        target_lang = get_target_language(request, runtime_config)
+
+        image_bytes = await request.body()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="No image data provided")
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _run_generator():
+            try:
+                for chunk in generate_sse_events(image_bytes, source_lang, target_lang):
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            except Exception as exc:
+                import json as _json
+                error_chunk = f"data: {_json.dumps({'event': 'error', 'message': str(exc)})}\n\n"
+                loop.call_soon_threadsafe(queue.put_nowait, error_chunk)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        async def stream_wrapper():
+            async with OCR_PROCESS_SEMAPHORE:
+                loop.run_in_executor(None, _run_generator)
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+
+        return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
+    except Exception as exc:
+        LOGGER.exception("Error processing image (streaming)")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(exc),
+                "error_type": type(exc).__name__,
+            },
         )
 
 

@@ -58,6 +58,7 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_MODEL = "generic_llm_ocr_model";
         public const string GENERIC_LLM_OCR_MODE = "generic_llm_ocr_mode";
         public const string GENERIC_LLM_OCR_TARGET_LANGUAGE = "generic_llm_ocr_target_language";
+        public const string GENERIC_LLM_OCR_STREAMING = "generic_llm_ocr_streaming";
         
         // Per-OCR glue settings (for EasyOCR, MangaOCR, docTR, Windows OCR, Google Vision)
         // Format: horizontal_glue_<ocrmethod>, vertical_glue_<ocrmethod>, keep_linefeeds_<ocrmethod>, leave_translation_onscreen_<ocrmethod>
@@ -1086,6 +1087,18 @@ namespace UGTLive
                 _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = language.Trim();
                 SaveConfig();
             }
+        }
+
+        public bool IsGenericLlmOcrStreamingEnabled()
+        {
+            string value = GetValue(GENERIC_LLM_OCR_STREAMING, "false");
+            return value.ToLower() == "true";
+        }
+
+        public void SetGenericLlmOcrStreamingEnabled(bool enabled)
+        {
+            _configValues[GENERIC_LLM_OCR_STREAMING] = enabled.ToString().ToLower();
+            SaveConfig();
         }
         
         
