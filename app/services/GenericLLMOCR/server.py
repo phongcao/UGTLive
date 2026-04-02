@@ -1,20 +1,28 @@
 """FastAPI server for a generic OpenAI-compatible vision OCR backend."""
 
 import asyncio
+import atexit
 import base64
+import faulthandler
+import logging
 import os
 import re
 import ssl
 import sys
 import time
+import traceback
 import unicodedata
 from io import BytesIO
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import certifi
 
 ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
+
+if sys.platform.startswith("win") and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import requests
 import uvicorn
@@ -44,6 +52,9 @@ except Exception as exc:
 config_path = Path(__file__).parent / "service_config.txt"
 SERVICE_CONFIG = parse_service_config(str(config_path))
 APP_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.txt"
+LOG_DIR = Path(__file__).parent / "logs"
+RUNTIME_LOG_PATH = LOG_DIR / "runtime.log"
+FAULT_LOG_PATH = LOG_DIR / "fault.log"
 
 SERVICE_NAME = get_config_value(SERVICE_CONFIG, "service_name", "Generic LLM OCR")
 SERVICE_PORT = int(get_config_value(SERVICE_CONFIG, "port", "5005"))
@@ -150,7 +161,76 @@ TRANSLATION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+
+def configure_runtime_logging() -> logging.Logger:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
+    logger = logging.getLogger("generic_llm_ocr")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | pid=%(process)d | %(threadName)s | %(message)s"
+    )
+
+    runtime_handler = RotatingFileHandler(
+        RUNTIME_LOG_PATH,
+        maxBytes=2 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    runtime_handler.setFormatter(formatter)
+    logger.addHandler(runtime_handler)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+
+    return logger
+
+
+LOGGER = configure_runtime_logging()
+_FAULT_LOG_FILE = open(FAULT_LOG_PATH, "a", encoding="utf-8")
+faulthandler.enable(_FAULT_LOG_FILE, all_threads=True)
+
+
+def append_fault_log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    _FAULT_LOG_FILE.write(f"[{timestamp}] {message}\n")
+    _FAULT_LOG_FILE.flush()
+
+
+def log_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    LOGGER.critical("Unhandled top-level exception", exc_info=(exc_type, exc_value, exc_traceback))
+    append_fault_log("Unhandled top-level exception:\n" + "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
+sys.excepthook = log_uncaught_exception
+
+
+def log_process_exit() -> None:
+    LOGGER.info("Process exiting normally pid=%s", os.getpid())
+    append_fault_log(f"Process exiting normally pid={os.getpid()}")
+    _FAULT_LOG_FILE.close()
+
+
+atexit.register(log_process_exit)
+
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_INSTALL_VERSION)
+OCR_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 
 
 try:
@@ -160,10 +240,22 @@ except AttributeError:
 
 
 if _COLOR_ANALYSIS_IMPORT_ERROR is not None:
-    print(
+    LOGGER.warning(
         "Color analysis disabled for Generic LLM OCR: "
         f"{type(_COLOR_ANALYSIS_IMPORT_ERROR).__name__}: {_COLOR_ANALYSIS_IMPORT_ERROR}"
     )
+
+
+def log_asyncio_exception(loop: asyncio.AbstractEventLoop, context: Dict) -> None:
+    exception = context.get("exception")
+    message = context.get("message", "Unhandled asyncio exception")
+    if exception is not None:
+        LOGGER.error("%s", message, exc_info=(type(exception), exception, exception.__traceback__))
+        append_fault_log(message + "\n" + "".join(traceback.format_exception(type(exception), exception, exception.__traceback__)))
+        return
+
+    LOGGER.error("%s", message)
+    append_fault_log(message)
 
 
 def load_runtime_settings() -> Dict[str, str]:
@@ -232,10 +324,10 @@ def save_debug_request_image(image: Image.Image, source_lang: str, prefix: str =
             f"{prefix}_{timestamp}-{milliseconds:03d}_{safe_lang}_{image.width}x{image.height}.png"
         )
         image.save(debug_path, format="PNG")
-        print(f"Saved Generic LLM OCR debug image to {debug_path}")
+        LOGGER.info("Saved Generic LLM OCR debug image to %s", debug_path)
         return debug_path
     except Exception as exc:
-        print(f"Failed to save Generic LLM OCR debug image: {exc}")
+        LOGGER.warning("Failed to save Generic LLM OCR debug image: %s", exc)
         return None
 
 
@@ -247,7 +339,7 @@ def get_non_negative_int(runtime_config: Dict[str, str], key: str, default: int)
     try:
         return max(0, int(raw_value))
     except ValueError:
-        print(f"Invalid Generic LLM OCR config for {key}: {raw_value}. Using {default}.")
+        LOGGER.warning("Invalid Generic LLM OCR config for %s: %s. Using %s.", key, raw_value, default)
         return default
 
 
@@ -278,7 +370,7 @@ def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) ->
         resized_width = max(1, int(round(original_width * scale_factor)))
         resized_height = max(1, int(round(original_height * scale_factor)))
         prepared_image = image.resize((resized_width, resized_height), RESAMPLE_LANCZOS)
-        print(
+        LOGGER.info(
             "Resized Generic LLM OCR request image "
             f"from {original_width}x{original_height} to {resized_width}x{resized_height}"
         )
@@ -402,10 +494,42 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
     if api_key and not api_key.startswith("<your"):
         headers["Authorization"] = f"Bearer {api_key}"
 
-    response = requests.post(endpoint, json=payload, headers=headers, timeout=180)
-    response.raise_for_status()
+    request_started = time.time()
+    LOGGER.info(
+        "LLM request start model=%s mode=%s endpoint=%s image=%sx%s source_lang=%s target_lang=%s payload_bytes=%s",
+        model,
+        mode,
+        endpoint,
+        width,
+        height,
+        source_lang,
+        target_lang,
+        len(image_bytes),
+    )
+
+    try:
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=180)
+        response.raise_for_status()
+    except requests.RequestException:
+        LOGGER.exception(
+            "LLM request failed model=%s mode=%s endpoint=%s after %.1f ms",
+            model,
+            mode,
+            endpoint,
+            (time.time() - request_started) * 1000.0,
+        )
+        raise
+
     response_json = response.json()
     content = response_json["choices"][0]["message"]["content"]
+    LOGGER.info(
+        "LLM request complete model=%s mode=%s status=%s duration_ms=%.1f response_chars=%s",
+        model,
+        mode,
+        response.status_code,
+        (time.time() - request_started) * 1000.0,
+        len(content or ""),
+    )
     return content, model, mode
 
 
@@ -470,19 +594,127 @@ def process_llm_results(
             if color_data:
                 attach_color_info(text_obj, color_data)
         except Exception as exc:
-            print(f"Color extraction failed: {exc}")
+            LOGGER.warning("Color extraction failed: %s", exc)
 
         text_objects.append(text_obj)
 
     return text_objects
 
 
+def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -> Dict:
+    start_time = time.time()
+    runtime_config = load_runtime_settings()
+
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    save_debug_request_image(image, source_lang)
+    llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
+    if llm_image.size != image.size:
+        save_debug_request_image(llm_image, source_lang, prefix="request_llm")
+
+    raw_response, model, mode = query_llm(
+        llm_image_bytes,
+        llm_image.width,
+        llm_image.height,
+        runtime_config,
+        source_lang,
+        target_lang,
+    )
+    text_objects = process_llm_results(
+        image,
+        raw_response,
+        mode,
+        llm_image.width,
+        llm_image.height,
+    )
+
+    return {
+        "status": "success",
+        "texts": text_objects,
+        "processing_time": time.time() - start_time,
+        "language": source_lang,
+        "char_level": False,
+        "backend": "generic_llm",
+        "mode": mode,
+        "model": model,
+        "includes_translations": any("translated_text" in text_obj for text_obj in text_objects),
+        "raw_response": raw_response,
+    }
+
+
+def analyze_color_sync(image_bytes: bytes) -> Dict:
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    width, height = image.size
+    bbox = [[0, 0], [width, 0], [width, height], [0, height]]
+    color_info = extract_foreground_background_colors(image, bbox)
+    return {"status": "success", "color_info": color_info}
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    asyncio.get_running_loop().set_exception_handler(log_asyncio_exception)
+    LOGGER.info(
+        "Service startup service=%s version=%s port=%s pid=%s python=%s",
+        SERVICE_NAME,
+        SERVICE_INSTALL_VERSION,
+        SERVICE_PORT,
+        os.getpid(),
+        sys.version.split()[0],
+    )
+    append_fault_log(
+        f"Service startup service={SERVICE_NAME} version={SERVICE_INSTALL_VERSION} port={SERVICE_PORT} pid={os.getpid()}"
+    )
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    LOGGER.info("Service shutdown requested pid=%s", os.getpid())
+    append_fault_log(f"Service shutdown requested pid={os.getpid()}")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    should_log = request.url.path != "/info"
+    content_length = request.headers.get("content-length", "unknown")
+    client = request.client.host if request.client else "unknown"
+
+    if should_log:
+        LOGGER.info(
+            "HTTP request start method=%s path=%s query=%s client=%s content_length=%s",
+            request.method,
+            request.url.path,
+            request.url.query,
+            client,
+            content_length,
+        )
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        LOGGER.exception(
+            "HTTP request failed method=%s path=%s duration_ms=%.1f",
+            request.method,
+            request.url.path,
+            (time.time() - start_time) * 1000.0,
+        )
+        raise
+
+    if should_log:
+        LOGGER.info(
+            "HTTP request end method=%s path=%s status=%s duration_ms=%.1f",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.time() - start_time) * 1000.0,
+        )
+
+    return response
+
+
 @app.post("/process")
 async def process_image(request: Request):
     try:
-        start_time = time.time()
         runtime_config = load_runtime_settings()
-
         source_lang = request.query_params.get("lang", runtime_config.get("source_language", "ja"))
         target_lang = get_target_language(request, runtime_config)
 
@@ -490,44 +722,11 @@ async def process_image(request: Request):
         if not image_bytes:
             raise HTTPException(status_code=400, detail="No image data provided")
 
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        save_debug_request_image(image, source_lang)
-        llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
-        if llm_image.size != image.size:
-            save_debug_request_image(llm_image, source_lang, prefix="request_llm")
-
-        raw_response, model, mode = query_llm(
-            llm_image_bytes,
-            llm_image.width,
-            llm_image.height,
-            runtime_config,
-            source_lang,
-            target_lang,
-        )
-        text_objects = process_llm_results(
-            image,
-            raw_response,
-            mode,
-            llm_image.width,
-            llm_image.height,
-        )
-
-        return JSONResponse(
-            content={
-                "status": "success",
-                "texts": text_objects,
-                "processing_time": time.time() - start_time,
-                "language": source_lang,
-                "char_level": False,
-                "backend": "generic_llm",
-                "mode": mode,
-                "model": model,
-                "includes_translations": any("translated_text" in text_obj for text_obj in text_objects),
-                "raw_response": raw_response,
-            }
-        )
+        async with OCR_PROCESS_SEMAPHORE:
+            response_content = await asyncio.to_thread(process_image_sync, image_bytes, source_lang, target_lang)
+        return JSONResponse(content=response_content)
     except Exception as exc:
-        print(f"Error processing image: {exc}")
+        LOGGER.exception("Error processing image")
         return JSONResponse(
             status_code=500,
             content={
@@ -545,12 +744,10 @@ async def analyze_color(request: Request):
         if not image_bytes:
             raise HTTPException(status_code=400, detail="No image data provided")
 
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        width, height = image.size
-        bbox = [[0, 0], [width, 0], [width, height], [0, height]]
-        color_info = extract_foreground_background_colors(image, bbox)
-        return JSONResponse(content={"status": "success", "color_info": color_info})
+        response_content = await asyncio.to_thread(analyze_color_sync, image_bytes)
+        return JSONResponse(content=response_content)
     except Exception as exc:
+        LOGGER.exception("Error analyzing color")
         return JSONResponse(
             status_code=500,
             content={"status": "error", "message": str(exc), "error_type": type(exc).__name__},
@@ -578,7 +775,7 @@ async def get_info():
 
 @app.post("/shutdown")
 async def shutdown():
-    print("Shutdown request received...")
+    LOGGER.info("Shutdown request received")
 
     async def shutdown_task():
         await asyncio.sleep(1)
@@ -595,4 +792,5 @@ async def shutdown():
 
 
 if __name__ == "__main__":
+    LOGGER.info("Launching uvicorn host=127.0.0.1 port=%s", SERVICE_PORT)
     uvicorn.run(app, host="127.0.0.1", port=SERVICE_PORT)

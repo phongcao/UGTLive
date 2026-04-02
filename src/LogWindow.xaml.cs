@@ -200,6 +200,11 @@ namespace UGTLive
         // Handle window closing - hide instead of close
         private void LogWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
+            if (System.Windows.Application.Current?.MainWindow is MainWindow mainWindow && mainWindow.IsShuttingDown)
+            {
+                return;
+            }
+
             e.Cancel = true;
             Hide();
             

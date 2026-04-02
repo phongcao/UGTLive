@@ -202,6 +202,7 @@ namespace UGTLive
 
         //allow this to be accesible through an "Instance" variable
         public static MainWindow Instance { get { return _this!; } }
+        public bool IsShuttingDown => _isShuttingDown;
 
         // Properties for initial window size (bound in XAML)
         public double InitialWidth
@@ -2577,7 +2578,7 @@ namespace UGTLive
             {
                 // Hide log window
                 LogWindow.Instance.Hide();
-                logButton.Background = new SolidColorBrush(Color.FromRgb(95, 95, 95)); // Neutral
+                updateLogButtonState(false);
             }
             else
             {
@@ -2586,13 +2587,24 @@ namespace UGTLive
                 LogWindow.Instance.Owner = this;
                 LogWindow.Instance.Show();
                 _toolbarWindow?.BringToFront();
-                logButton.Background = new SolidColorBrush(Color.FromRgb(46, 160, 67)); // Active indicator
+                updateLogButtonState(true);
             }
         }
         
         public void updateLogButtonState(bool isVisible)
         {
-            logButton.Background = isVisible
+            if (_isShuttingDown)
+            {
+                return;
+            }
+
+            var button = logButton;
+            if (button == null)
+            {
+                return;
+            }
+
+            button.Background = isVisible
                 ? new SolidColorBrush(Color.FromRgb(46, 160, 67))
                 : new SolidColorBrush(Color.FromRgb(95, 95, 95));
         }
