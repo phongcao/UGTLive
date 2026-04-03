@@ -2382,7 +2382,7 @@ namespace UGTLive
                 bool autoTranslateEnabled = MainWindow.Instance.GetTranslateEnabled();
                 long sessionId = _overlaySessionId;
 
-                var streamedTextData = new List<(string text, double x, double y, double width, double height,
+                var streamedTextData = new List<(string streamId, string text, double x, double y, double width, double height,
                     string orientation, Color? fg, Color? bg, string translated)>();
 
                 // Accumulate the full LLM response for append-mode logging
@@ -2527,7 +2527,7 @@ namespace UGTLive
                             }
 
                             // Collect text data for hash comparison (render after stream completes)
-                            streamedTextData.Add((text, x, y, width, height, textOrientation,
+                            streamedTextData.Add((streamId, text, x, y, width, height, textOrientation,
                                 foregroundColor, backgroundColor, translatedText));
                         }
                         else if (eventType == "llm_delta")
@@ -2589,12 +2589,31 @@ namespace UGTLive
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
                     Log($"Streaming: New content hash: {streamHash.Substring(0, Math.Min(25, streamHash.Length))}..., rendering {streamedTextData.Count} text objects");
 
-                // Content has changed — clear old objects and render new ones
-                ClearAllTextObjects();
+                Dictionary<string, double> monitorStreamingFontSizes = await MonitorWindow.Instance.CaptureStreamingOverlayFontSizesAsync();
+                Dictionary<string, double> mainWindowStreamingFontSizes = MainWindow.Instance != null
+                    ? await MainWindow.Instance.CaptureStreamingOverlayFontSizesAsync()
+                    : new Dictionary<string, double>();
+
+                // Clear internal text object data without touching visual overlays.
+                // The streaming overlays are still visible in the DOM and will be
+                // replaced in-place by CommitStreamingOverlay below.
+                ClearAllTextObjects(skipVisualClear: true);
                 Application.Current.Dispatcher.Invoke(() =>
                 {
-                    MonitorWindow.Instance.ClearStreamingOverlays();
+                    MonitorWindow.Instance.ClearLockedStreamingFontSizes();
+                    MainWindow.Instance?.ClearLockedStreamingFontSizes();
+                    MonitorWindow.Instance.ClearCommittedOverlays();
+                    MainWindow.Instance?.ClearCommittedOverlays();
                     MonitorWindow.Instance.ClearOverlayCache();
+                    MainWindow.Instance?.ClearMainWindowOverlayCache();
+                });
+
+                // Suppress overlay refresh so CreateTextObjectAtPosition's internal
+                // calls to UpdateOverlayWebView are no-ops (the overlays are already
+                // correctly rendered via JavaScript DOM manipulation).
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    MonitorWindow.Instance.SetOverlayRefreshSuppressed(true);
                 });
 
                 foreach (var item in streamedTextData)
@@ -2606,25 +2625,32 @@ namespace UGTLive
                     if (!string.IsNullOrWhiteSpace(item.translated) && _textObjects.Count > previousCount)
                         _textObjects[_textObjects.Count - 1].TextTranslated = item.translated;
 
-                    // Incrementally inject overlay into WebView
                     if (_textObjects.Count > previousCount)
                     {
                         var newTextObj = _textObjects[_textObjects.Count - 1];
+                        if (monitorStreamingFontSizes.TryGetValue(item.streamId, out double monitorLockedFontSize))
+                        {
+                            MonitorWindow.Instance.SetLockedStreamingFontSize(newTextObj.ID, monitorLockedFontSize);
+                        }
+
+                        if (mainWindowStreamingFontSizes.TryGetValue(item.streamId, out double mainLockedFontSize))
+                        {
+                            MainWindow.Instance?.SetLockedStreamingFontSize(newTextObj.ID, mainLockedFontSize);
+                        }
+
                         Application.Current.Dispatcher.Invoke(() =>
                         {
-                            MonitorWindow.Instance.AddStreamingOverlay(newTextObj);
-                        });
+                            MonitorWindow.Instance.CommitStreamingOverlay(item.streamId, newTextObj);
+                            MainWindow.Instance?.CommitStreamingOverlay(item.streamId, newTextObj);
+                        }, DispatcherPriority.Send);
                     }
                 }
 
-                // Full overlay refresh to normalize state (HTML cache, audio icons, etc.)
                 Application.Current.Dispatcher.Invoke(() =>
                 {
-                    MonitorWindow.Instance.ClearOverlayCache();
-                    MonitorWindow.Instance.RefreshOverlays();
-                    MainWindow.Instance.RefreshMainWindowOverlays();
+                    MonitorWindow.Instance.SetOverlayRefreshSuppressed(false);
                     MonitorWindow.Instance.ClearStreamingOverlays();
-                    MainWindow.Instance.ClearStreamingOverlays();
+                    MainWindow.Instance?.ClearStreamingOverlays();
                 });
 
                 // Trigger audio preloading
@@ -2655,11 +2681,14 @@ namespace UGTLive
                                     foreach (TextObject t in _textObjectsOld)
                                         t.Dispose();
                                     _textObjectsOld.Clear();
-                                    MonitorWindow.Instance?.ClearOverlayCache();
                                     _keepingTranslationVisible = false;
                                 }
 
-                                FinalizeAppliedTranslations();
+                                // Skip overlay refresh — streaming overlays are already
+                                // correctly committed in the DOM via JavaScript.
+                                // A full RefreshOverlays would call NavigateToString which
+                                // destroys and reloads the page, causing a visible flicker.
+                                FinalizeAppliedTranslations(skipOverlayRefresh: true);
                             }
                             else if (!GetWaitingForTranslationToFinish())
                             {
@@ -3064,7 +3093,7 @@ namespace UGTLive
         
      
         // Clear all text objects
-        public void ClearAllTextObjects()
+        public void ClearAllTextObjects(bool skipVisualClear = false)
         {
             try
             {
@@ -3075,12 +3104,15 @@ namespace UGTLive
                     // Run on UI thread synchronously - must complete before caller
                     // continues adding new text objects to avoid a race condition where
                     // the dispatched clear runs AFTER new objects are added and destroys them
-                    Application.Current.Dispatcher.Invoke(new Action(() => ClearAllTextObjects()), DispatcherPriority.Send);
+                    Application.Current.Dispatcher.Invoke(new Action(() => ClearAllTextObjects(skipVisualClear)), DispatcherPriority.Send);
                     return;
                 }
 
                 // Increment session ID to invalidate any pending OCR requests
                 _overlaySessionId++;
+
+                MonitorWindow.Instance?.ClearLockedStreamingFontSizes();
+                MainWindow.Instance?.ClearLockedStreamingFontSizes();
 
                 // Cancel any in-progress audio preloading
                 AudioPreloadService.Instance.CancelAllPreloads();
@@ -3117,12 +3149,16 @@ namespace UGTLive
                     // Normal clearing - remove both text objects and visual overlays
                     foreach (TextObject textObject in _textObjects)
                     {
-                        MonitorWindow.Instance?.RemoveOverlay(textObject);
+                        if (!skipVisualClear)
+                            MonitorWindow.Instance?.RemoveOverlay(textObject);
                         textObject.Dispose();
                     }
 
-                    MonitorWindow.Instance?.ClearOverlays();
-                    MainWindow.Instance?.RefreshMainWindowOverlays();
+                    if (!skipVisualClear)
+                    {
+                        MonitorWindow.Instance?.ClearOverlays();
+                        MainWindow.Instance?.RefreshMainWindowOverlays();
+                    }
 
                     // Clear the collection
                     _textObjects.Clear();
@@ -3405,10 +3441,13 @@ namespace UGTLive
 
         }
 
-        private void FinalizeAppliedTranslations()
+        private void FinalizeAppliedTranslations(bool skipOverlayRefresh = false)
         {
-            MonitorWindow.Instance.RefreshOverlays();
-            MainWindow.Instance.RefreshMainWindowOverlays();
+            if (!skipOverlayRefresh)
+            {
+                MonitorWindow.Instance.RefreshOverlays();
+                MainWindow.Instance.RefreshMainWindowOverlays();
+            }
 
             TriggerTargetAudioPreloading();
 

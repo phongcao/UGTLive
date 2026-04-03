@@ -40,6 +40,7 @@ namespace UGTLive
         private int _scrollbarHeight = 0;
         private int _titleBarHeight = 0;
         private string _lastHitRegion = ""; // Track which region we're over to reduce logging noise
+        private bool _suppressOverlayRefresh = false;
         
         // Singleton pattern to match application style
         private static MonitorWindow? _instance;
@@ -734,12 +735,123 @@ namespace UGTLive
         }
         
         private string _lastOverlayHtml = string.Empty;
+        private readonly Dictionary<string, double> _lockedStreamingFontSizes = new();
         
         // Method to force clear the HTML cache (for when settings change)
         public void ClearOverlayCache()
         {
             Console.WriteLine("[MONITOR] ClearOverlayCache called - forcing HTML regeneration");
             _lastOverlayHtml = string.Empty;
+        }
+
+        /// <summary>
+        /// Pre-generate and cache the overlay HTML so that the next RefreshOverlays()
+        /// sees no change and skips the destructive NavigateToString call.
+        /// Call this after streaming overlays have been committed via JS to avoid
+        /// a full-page reload flicker.
+        /// </summary>
+        public void SyncOverlayHtmlCache()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => SyncOverlayHtmlCache(), DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                _lastOverlayHtml = GenerateOverlayHtml();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[MONITOR] SyncOverlayHtmlCache failed: {ex.Message}");
+            }
+        }
+
+        public async Task<Dictionary<string, double>> CaptureStreamingOverlayFontSizesAsync()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                var operation = Dispatcher.InvokeAsync(() => CaptureStreamingOverlayFontSizesAsync(), DispatcherPriority.Send);
+                return await operation.Task.Unwrap();
+            }
+
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            {
+                return new Dictionary<string, double>();
+            }
+
+            try
+            {
+                string rawResult = await textOverlayWebView.CoreWebView2.ExecuteScriptAsync("getStreamingOverlayFontSizes();");
+                string? json = System.Text.Json.JsonSerializer.Deserialize<string>(rawResult);
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    return new Dictionary<string, double>();
+                }
+
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                var fontSizes = new Dictionary<string, double>(StringComparer.Ordinal);
+                if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                {
+                    return fontSizes;
+                }
+
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (property.Value.ValueKind == System.Text.Json.JsonValueKind.Number
+                        && property.Value.TryGetDouble(out double fontSize)
+                        && fontSize > 0)
+                    {
+                        fontSizes[property.Name] = fontSize;
+                    }
+                }
+
+                return fontSizes;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error capturing MonitorWindow streaming font sizes: {ex.Message}");
+                return new Dictionary<string, double>();
+            }
+        }
+
+        public void SetLockedStreamingFontSize(string textObjectId, double fontSize)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => SetLockedStreamingFontSize(textObjectId, fontSize), DispatcherPriority.Send);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(textObjectId) || double.IsNaN(fontSize) || double.IsInfinity(fontSize) || fontSize <= 0)
+            {
+                return;
+            }
+
+            _lockedStreamingFontSizes[textObjectId] = fontSize;
+        }
+
+        public void ClearLockedStreamingFontSizes()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(ClearLockedStreamingFontSizes, DispatcherPriority.Send);
+                return;
+            }
+
+            _lockedStreamingFontSizes.Clear();
+        }
+
+        public void SetOverlayRefreshSuppressed(bool suppressed)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => SetOverlayRefreshSuppressed(suppressed), DispatcherPriority.Send);
+                return;
+            }
+
+            _suppressOverlayRefresh = suppressed;
         }
 
         /// <summary>
@@ -897,10 +1009,178 @@ namespace UGTLive
                 Console.WriteLine($"Error clearing streaming overlays: {ex.Message}");
             }
         }
+
+        public void ClearCommittedOverlays()
+        {
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+                return;
+
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => ClearCommittedOverlays(), DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                textOverlayWebView.CoreWebView2.ExecuteScriptAsync("clearCommittedOverlays();");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error clearing committed overlays: {ex.Message}");
+            }
+        }
+
+        public void CommitStreamingOverlay(string streamId, TextObject textObj)
+        {
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null || textObj == null)
+                return;
+
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => CommitStreamingOverlay(streamId, textObj), DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                bool isTranslated = false;
+                string textToShow = textObj.Text;
+                string displayOrientation = textObj.TextOrientation;
+
+                if (_currentOverlayMode == OverlayMode.Translated && !string.IsNullOrEmpty(textObj.TextTranslated))
+                {
+                    textToShow = textObj.TextTranslated;
+                    isTranslated = true;
+                    if (textObj.TextOrientation == "vertical")
+                    {
+                        string targetLang = ConfigManager.Instance.GetTargetLanguage().ToLower();
+                        if (!IsVerticalSupportedLanguage(targetLang))
+                        {
+                            displayOrientation = "horizontal";
+                        }
+                    }
+                }
+
+                Color bgColor = ConfigManager.Instance.IsMonitorOverrideBgColorEnabled()
+                    ? ConfigManager.Instance.GetMonitorOverrideBgColor()
+                    : textObj.BackgroundColor?.Color ?? Colors.Black;
+
+                double bgOpacity = ConfigManager.Instance.GetMonitorBgOpacity();
+                byte alphaValue = (byte)(bgOpacity * 255);
+                bgColor = Color.FromArgb(alphaValue, bgColor.R, bgColor.G, bgColor.B);
+
+                Color textColor = ConfigManager.Instance.IsMonitorOverrideFontColorEnabled()
+                    ? ConfigManager.Instance.GetMonitorOverrideFontColor()
+                    : textObj.TextColor?.Color ?? Colors.White;
+
+                string fontFamily = isTranslated
+                    ? ConfigManager.Instance.GetTargetLanguageFontFamily()
+                    : ConfigManager.Instance.GetSourceLanguageFontFamily();
+                bool isBold = isTranslated
+                    ? ConfigManager.Instance.GetTargetLanguageFontBold()
+                    : ConfigManager.Instance.GetSourceLanguageFontBold();
+
+                string encodedText = System.Web.HttpUtility.HtmlEncode(textToShow.Trim())
+                    .Replace("\r\n", "<br>")
+                    .Replace("\r", "<br>")
+                    .Replace("\n", "<br>");
+
+                bool hasLockedStreamingFontSize = _lockedStreamingFontSizes.TryGetValue(textObj.ID, out double lockedStreamingFontSize);
+                double initialFontSize = hasLockedStreamingFontSize
+                    ? lockedStreamingFontSize
+                    : Math.Max(8, Math.Min(128, textObj.Height * 0.7));
+
+                int borderRadius = ConfigManager.Instance.GetMonitorTextOverlayBorderRadius();
+                string rgbaString = $"rgba({bgColor.R},{bgColor.G},{bgColor.B},{bgColor.A / 255.0:F3})";
+                string styleAttr = $"left: {textObj.X}px; top: {textObj.Y}px; width: {textObj.Width}px; height: {textObj.Height}px; " +
+                    $"box-shadow: inset 0 0 0 1000px {rgbaString}; " +
+                    $"background-color: transparent; " +
+                    $"color: rgb({textColor.R},{textColor.G},{textColor.B}); " +
+                    $"font-family: {string.Join(", ", fontFamily.Split(',').Select(f => $"\"{f.Trim()}\""))}; " +
+                    $"font-weight: {(isBold ? "bold" : "normal")}; " +
+                    $"font-size: {initialFontSize}px; " +
+                    $"border-radius: {borderRadius}px;";
+
+                bool isTtsPreloadEnabled = ConfigManager.Instance.IsTtsPreloadEnabled();
+                string preloadMode = ConfigManager.Instance.GetTtsPreloadMode();
+                bool preloadEnabled = ConfigManager.Instance.IsTtsEnabled()
+                    && isTtsPreloadEnabled && preloadMode != "Off";
+
+                bool showAudioIcon = false;
+                bool audioIsReady = false;
+                bool isSourceForClick = true;
+                string iconEmoji = ConfigManager.ICON_SPEAKER_NOT_READY;
+                string iconClass = "audio-icon loading";
+
+                if (preloadEnabled && !ConfigManager.Instance.IsTextBelowTtsMinChars(textObj.Text))
+                {
+                    showAudioIcon = true;
+                    if (isTranslated)
+                    {
+                        if (textObj.TargetAudioReady && !string.IsNullOrEmpty(textObj.TargetAudioFilePath))
+                        {
+                            audioIsReady = true;
+                            isSourceForClick = false;
+                        }
+                        else
+                        {
+                            isSourceForClick = textObj.SourceAudioReady;
+                        }
+                    }
+                    else if (textObj.SourceAudioReady && !string.IsNullOrEmpty(textObj.SourceAudioFilePath))
+                    {
+                        audioIsReady = true;
+                        isSourceForClick = true;
+                    }
+
+                    iconEmoji = audioIsReady ? ConfigManager.ICON_SPEAKER_READY : ConfigManager.ICON_SPEAKER_NOT_READY;
+                    iconClass = audioIsReady ? "audio-icon" : "audio-icon loading";
+                }
+
+                string cssClass = displayOrientation == "vertical" ? "text-overlay vertical-text" : "text-overlay";
+                string jsStreamId = System.Text.Json.JsonSerializer.Serialize(streamId);
+                string jsFinalId = System.Text.Json.JsonSerializer.Serialize(textObj.ID);
+                string jsCssClass = System.Text.Json.JsonSerializer.Serialize(cssClass);
+                string jsStyle = System.Text.Json.JsonSerializer.Serialize(styleAttr);
+                string jsText = System.Text.Json.JsonSerializer.Serialize(encodedText);
+                string jsAttributes = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    ["data-source-text"] = textObj.Text ?? string.Empty,
+                    ["data-translated-text"] = textObj.TextTranslated ?? string.Empty,
+                    ["data-source-audio"] = textObj.SourceAudioFilePath ?? string.Empty,
+                    ["data-target-audio"] = textObj.TargetAudioFilePath ?? string.Empty,
+                    ["data-source-ready"] = textObj.SourceAudioReady.ToString().ToLower(),
+                    ["data-target-ready"] = textObj.TargetAudioReady.ToString().ToLower(),
+                    ["data-original-font-size"] = initialFontSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ["data-locked-font-size"] = hasLockedStreamingFontSize
+                        ? lockedStreamingFontSize.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        : string.Empty,
+                    ["data-orientation"] = textObj.TextOrientation ?? "horizontal",
+                });
+                string jsShowAudioIcon = showAudioIcon.ToString().ToLower();
+                string jsIconClass = System.Text.Json.JsonSerializer.Serialize(iconClass);
+                string jsIconEmoji = System.Text.Json.JsonSerializer.Serialize(iconEmoji);
+                string jsIsSourceForClick = isSourceForClick.ToString().ToLower();
+                string jsAudioReady = audioIsReady.ToString().ToLower();
+
+                string script = $"commitStreamingOverlay({jsStreamId}, {jsFinalId}, {jsCssClass}, {jsStyle}, {jsText}, {jsAttributes}, {jsShowAudioIcon}, {jsIconClass}, {jsIconEmoji}, {jsIsSourceForClick}, {jsAudioReady});";
+                textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error committing streaming overlay: {ex.Message}");
+            }
+        }
         
         private void UpdateOverlayWebView()
         {
             if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            {
+                return;
+            }
+
+            if (_suppressOverlayRefresh)
             {
                 return;
             }
@@ -975,6 +1255,24 @@ namespace UGTLive
             html.AppendLine("  justify-content: center;");
             html.AppendLine("  width: 100%;");
             html.AppendLine("  height: 100%;");
+            html.AppendLine("}");
+            html.AppendLine(".streaming-overlay .text-content {");
+            html.AppendLine("  justify-content: flex-start;");
+            html.AppendLine("  text-align: left;");
+            html.AppendLine("}");
+            html.AppendLine(".streaming-overlay.vertical-text .text-content {");
+            html.AppendLine("  align-items: flex-start;");
+            html.AppendLine("  justify-content: flex-start;");
+            html.AppendLine("  text-align: start;");
+            html.AppendLine("}");
+            html.AppendLine(".text-overlay[data-locked-font-size] .text-content {");
+            html.AppendLine("  justify-content: flex-start;");
+            html.AppendLine("  text-align: left;");
+            html.AppendLine("}");
+            html.AppendLine(".text-overlay.vertical-text[data-locked-font-size] .text-content {");
+            html.AppendLine("  align-items: flex-start;");
+            html.AppendLine("  justify-content: flex-start;");
+            html.AppendLine("  text-align: start;");
             html.AppendLine("}");
             html.AppendLine(".audio-icon {");
             html.AppendLine("  position: absolute;");
@@ -1086,10 +1384,49 @@ namespace UGTLive
             html.AppendLine("  element.style.fontSize = bestSize + 'px';");
             html.AppendLine("}");
             html.AppendLine("");
+            html.AppendLine("function fitStreamingTextToBox(element, container) {");
+            html.AppendLine("  const minSize = 8;");
+            html.AppendLine("  const absoluteMaxSize = 128;");
+            html.AppendLine("  const sizeRef = container || element;");
+            html.AppendLine("  const storedSize = parseFloat(sizeRef.getAttribute('data-stream-font-size') || '');");
+            html.AppendLine("  const computedSize = parseFloat(window.getComputedStyle(element).fontSize || '');");
+            html.AppendLine("  let maxSize = Number.isFinite(storedSize) && storedSize > 0 ? storedSize : computedSize;");
+            html.AppendLine("  if (!Number.isFinite(maxSize) || maxSize <= 0) {");
+            html.AppendLine("    maxSize = absoluteMaxSize;");
+            html.AppendLine("  }");
+            html.AppendLine("  if (!(Number.isFinite(storedSize) && storedSize > 0)) {");
+            html.AppendLine("    maxSize = Math.max(minSize, maxSize * 0.9);");
+            html.AppendLine("  }");
+            html.AppendLine("  maxSize = Math.max(minSize, Math.min(absoluteMaxSize, maxSize));");
+            html.AppendLine("  let bestSize = minSize;");
+            html.AppendLine("  let low = minSize;");
+            html.AppendLine("  let high = maxSize;");
+            html.AppendLine("  while (high - low > 0.5) {");
+            html.AppendLine("    const mid = (low + high) / 2;");
+            html.AppendLine("    element.style.fontSize = mid + 'px';");
+            html.AppendLine("    const fitsHeight = element.scrollHeight <= element.clientHeight;");
+            html.AppendLine("    const fitsWidth = element.scrollWidth <= element.clientWidth;");
+            html.AppendLine("    if (fitsHeight && fitsWidth) {");
+            html.AppendLine("      bestSize = mid;");
+            html.AppendLine("      low = mid;");
+            html.AppendLine("    } else {");
+            html.AppendLine("      high = mid;");
+            html.AppendLine("    }");
+            html.AppendLine("  }");
+            html.AppendLine("  element.style.fontSize = bestSize + 'px';");
+            html.AppendLine("  sizeRef.setAttribute('data-stream-font-size', String(bestSize));");
+            html.AppendLine("}");
+            html.AppendLine("");
             html.AppendLine("window.addEventListener('load', function() {");
             html.AppendLine("  const overlays = document.querySelectorAll('.text-overlay');");
             html.AppendLine("  overlays.forEach(overlay => {");
             html.AppendLine("    const textContent = overlay.querySelector('.text-content');");
+            html.AppendLine("    const lockedFontSize = parseFloat(overlay.getAttribute('data-locked-font-size') || '');");
+            html.AppendLine("    if (Number.isFinite(lockedFontSize) && lockedFontSize > 0) {");
+            html.AppendLine("      if (textContent) textContent.style.fontSize = lockedFontSize + 'px';");
+            html.AppendLine("      else overlay.style.fontSize = lockedFontSize + 'px';");
+            html.AppendLine("      return;");
+            html.AppendLine("    }");
             html.AppendLine("    if (textContent) fitTextToBox(textContent, overlay);");
             html.AppendLine("    else fitTextToBox(overlay); // Fallback for overlays without text-content wrapper");
             html.AppendLine("  });");
@@ -1250,11 +1587,72 @@ namespace UGTLive
             html.AppendLine("    div.appendChild(span);");
             html.AppendLine("  }");
             html.AppendLine("  span.innerHTML = encodedText;");
-            html.AppendLine("  fitTextToBox(span, div);");
+            html.AppendLine("  fitStreamingTextToBox(span, div);");
             html.AppendLine("}");
             html.AppendLine("");
             html.AppendLine("function clearAllStreamingOverlays() {");
             html.AppendLine("  document.querySelectorAll('[data-streaming=\"true\"]').forEach(node => node.remove());");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function clearCommittedOverlays() {");
+            html.AppendLine("  document.querySelectorAll('.text-overlay:not([data-streaming=\"true\"])').forEach(node => node.remove());");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function applyOverlayAttributes(div, attributes) {");
+            html.AppendLine("  Object.entries(attributes || {}).forEach(([key, value]) => {");
+            html.AppendLine("    if (value === null || value === undefined || value === '') div.removeAttribute(key);");
+            html.AppendLine("    else div.setAttribute(key, String(value));");
+            html.AppendLine("  });");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function commitStreamingOverlay(streamId, finalId, cssClass, styleAttr, encodedText, attributes, showAudioIcon, iconClass, iconEmoji, isSourceForClick, audioIsReady) {");
+            html.AppendLine("  const container = document.getElementById('scroll-container');");
+            html.AppendLine("  if (!container) return;");
+            html.AppendLine("  const streamingId = 'streaming-overlay-' + streamId;");
+            html.AppendLine("  const finalDomId = 'overlay-' + finalId;");
+            html.AppendLine("  let div = document.getElementById(streamingId) || document.getElementById(finalDomId);");
+            html.AppendLine("  if (!div) {");
+            html.AppendLine("    div = document.createElement('div');");
+            html.AppendLine("    container.appendChild(div);");
+            html.AppendLine("  }");
+            html.AppendLine("  div.id = finalDomId;");
+            html.AppendLine("  div.removeAttribute('data-streaming');");
+            html.AppendLine("  div.className = cssClass;");
+            html.AppendLine("  div.setAttribute('style', styleAttr);");
+            html.AppendLine("  applyOverlayAttributes(div, attributes);");
+            html.AppendLine("  let span = div.querySelector('.text-content');");
+            html.AppendLine("  if (!span) {");
+            html.AppendLine("    span = document.createElement('span');");
+            html.AppendLine("    span.className = 'text-content';");
+            html.AppendLine("    div.appendChild(span);");
+            html.AppendLine("  }");
+            html.AppendLine("  span.innerHTML = encodedText;");
+            html.AppendLine("  let icon = div.querySelector('.audio-icon');");
+            html.AppendLine("  if (!showAudioIcon) {");
+            html.AppendLine("    if (icon) icon.remove();");
+            html.AppendLine("  } else {");
+            html.AppendLine("    if (!icon) {");
+            html.AppendLine("      icon = document.createElement('div');");
+            html.AppendLine("      div.insertBefore(icon, span);");
+            html.AppendLine("    }");
+            html.AppendLine("    icon.className = iconClass;");
+            html.AppendLine("    icon.setAttribute('data-is-ready', audioIsReady ? 'true' : 'false');");
+            html.AppendLine("    icon.setAttribute('onclick', 'handleAudioIconClick(\"' + finalId + '\", ' + isSourceForClick + ')');");
+            html.AppendLine("    icon.textContent = iconEmoji;");
+            html.AppendLine("  }");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function getStreamingOverlayFontSizes() {");
+            html.AppendLine("  const result = {};");
+            html.AppendLine("  document.querySelectorAll('[data-streaming=\"true\"]').forEach(node => {");
+            html.AppendLine("    const textContent = node.querySelector('.text-content');");
+            html.AppendLine("    const target = textContent || node;");
+            html.AppendLine("    const fontSize = parseFloat(window.getComputedStyle(target).fontSize || '');");
+            html.AppendLine("    if (Number.isFinite(fontSize) && fontSize > 0) {");
+            html.AppendLine("      result[node.id.replace('streaming-overlay-', '')] = fontSize;");
+            html.AppendLine("    }");
+            html.AppendLine("  });");
+            html.AppendLine("  return JSON.stringify(result);");
             html.AppendLine("}");
             html.AppendLine("</script>");
             html.AppendLine("</head>");
@@ -1356,7 +1754,10 @@ namespace UGTLive
                         
                         // Calculate initial font size based on box height (will be refined by JavaScript)
                         // Use 70% of height as a starting point, ensuring it's reasonable
-                        double initialFontSize = Math.Max(8, Math.Min(128, height * 0.7));
+                        bool hasLockedStreamingFontSize = _lockedStreamingFontSizes.TryGetValue(textObj.ID, out double lockedStreamingFontSize);
+                        double initialFontSize = hasLockedStreamingFontSize
+                            ? lockedStreamingFontSize
+                            : Math.Max(8, Math.Min(128, height * 0.7));
                         
                         // Build the inline style string with box-shadow for semi-transparent background
                         // (WebView2 doesn't support rgba() on background-color, but DOES on box-shadow)
@@ -1371,6 +1772,10 @@ namespace UGTLive
                         
                         string cssClass = displayOrientation == "vertical" ? "text-overlay vertical-text" : "text-overlay";
                         html.Append($"<div id='overlay-{textObj.ID}' class='{cssClass}' style='{styleAttr}' ");
+                        if (hasLockedStreamingFontSize)
+                        {
+                            html.Append($"data-locked-font-size='{lockedStreamingFontSize.ToString(System.Globalization.CultureInfo.InvariantCulture)}' ");
+                        }
                         html.Append($"data-source-audio='{System.Web.HttpUtility.HtmlAttributeEncode(textObj.SourceAudioFilePath ?? "")}' ");
                         html.Append($"data-target-audio='{System.Web.HttpUtility.HtmlAttributeEncode(textObj.TargetAudioFilePath ?? "")}' ");
                         html.Append($"data-source-ready='{textObj.SourceAudioReady.ToString().ToLower()}' ");
@@ -2152,6 +2557,11 @@ namespace UGTLive
                         textObject.BackgroundColor?.Clone() ?? new SolidColorBrush(Color.FromArgb(255, 0, 0, 0)),
                         textObject.TextColor?.Clone() ?? new SolidColorBrush(Colors.White)
                     );
+                }
+
+                if (_suppressOverlayRefresh)
+                {
+                    return;
                 }
                 
                 // Trigger WebView update
