@@ -814,7 +814,7 @@ def query_llm_streaming(
             content = delta.get("content", "")
             if content:
                 accumulated += content
-                yield accumulated, model, mode
+                yield accumulated, content, model, mode
         except Exception:
             continue
 
@@ -852,7 +852,7 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
     yield f"data: {_json.dumps(header)}\n\n"
 
     try:
-        for accumulated_text, model, mode in query_llm_streaming(
+        for accumulated_text, delta_content, model, mode in query_llm_streaming(
             llm_image_bytes,
             llm_image.width,
             llm_image.height,
@@ -860,6 +860,10 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
             source_lang,
             target_lang,
         ):
+            # Forward the raw LLM delta so the client can log it in real-time
+            delta_event = {"event": "llm_delta", "content": delta_content}
+            yield f"data: {_json.dumps(delta_event)}\n\n"
+
             # Try to parse any new complete lines from the accumulated text
             matches = list(TRANSLATION_PATTERN.finditer(accumulated_text))
             new_matches = matches[emitted_count:]

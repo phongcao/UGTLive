@@ -2337,6 +2337,9 @@ namespace UGTLive
                 var streamedTextData = new List<(string text, double x, double y, double width, double height,
                     string orientation, Color? fg, Color? bg, string translated)>();
 
+                // Accumulate the full LLM response for append-mode logging
+                var llmAccumulated = new StringBuilder();
+
                 using var stream = await response.Content.ReadAsStreamAsync();
                 using var reader = new StreamReader(stream);
 
@@ -2414,6 +2417,17 @@ namespace UGTLive
                             // Collect text data for hash comparison (render after stream completes)
                             streamedTextData.Add((text, x, y, width, height, textOrientation,
                                 foregroundColor, backgroundColor, translatedText));
+                        }
+                        else if (eventType == "llm_delta")
+                        {
+                            // Append each token and log the accumulated response so far
+                            string delta = root.TryGetProperty("content", out var contentEl) ? contentEl.GetString() ?? "" : "";
+                            if (!string.IsNullOrEmpty(delta))
+                            {
+                                llmAccumulated.Append(delta);
+                                string accumulated = llmAccumulated.ToString().Replace("\r", "").Replace("\n", " | ");
+                                Log($"LLM stream: {accumulated}");
+                            }
                         }
                         else if (eventType == "stream_end")
                         {
