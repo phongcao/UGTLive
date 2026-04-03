@@ -3509,6 +3509,154 @@ namespace UGTLive
             // Regenerate overlay HTML with updated interaction settings
             RefreshMainWindowOverlays();
         }
+
+        public void AddStreamingOverlay(
+            string overlayId,
+            string sourceText,
+            string translatedText,
+            double x,
+            double y,
+            double width,
+            double height,
+            string textOrientation = "horizontal",
+            Color? foregroundColor = null,
+            Color? backgroundColor = null)
+        {
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            {
+                return;
+            }
+
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(
+                    () => AddStreamingOverlay(
+                        overlayId,
+                        sourceText,
+                        translatedText,
+                        x,
+                        y,
+                        width,
+                        height,
+                        textOrientation,
+                        foregroundColor,
+                        backgroundColor),
+                    DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                bool isTranslated = false;
+                string textToShow = sourceText ?? string.Empty;
+                string displayOrientation = textOrientation;
+
+                if (_currentOverlayMode == OverlayMode.Translated && !string.IsNullOrEmpty(translatedText))
+                {
+                    textToShow = translatedText;
+                    isTranslated = true;
+
+                    if (textOrientation == "vertical")
+                    {
+                        string targetLang = ConfigManager.Instance.GetTargetLanguage().ToLower();
+                        if (!MonitorWindow.IsVerticalSupportedLanguage(targetLang))
+                        {
+                            displayOrientation = "horizontal";
+                        }
+                    }
+                }
+
+                Color bgColor;
+                if (ConfigManager.Instance.IsMonitorOverrideBgColorEnabled())
+                {
+                    bgColor = ConfigManager.Instance.GetMonitorOverrideBgColor();
+                }
+                else
+                {
+                    bgColor = backgroundColor ?? Colors.Black;
+                }
+
+                Color textColor;
+                if (ConfigManager.Instance.IsMonitorOverrideFontColorEnabled())
+                {
+                    textColor = ConfigManager.Instance.GetMonitorOverrideFontColor();
+                }
+                else
+                {
+                    textColor = foregroundColor ?? Colors.White;
+                }
+
+                double bgOpacity = ConfigManager.Instance.GetMonitorBgOpacity();
+                byte alphaValue = (byte)(bgOpacity * 255);
+                bgColor = Color.FromArgb(alphaValue, bgColor.R, bgColor.G, bgColor.B);
+
+                string fontFamily = isTranslated
+                    ? ConfigManager.Instance.GetTargetLanguageFontFamily()
+                    : ConfigManager.Instance.GetSourceLanguageFontFamily();
+                bool isBold = isTranslated
+                    ? ConfigManager.Instance.GetTargetLanguageFontBold()
+                    : ConfigManager.Instance.GetSourceLanguageFontBold();
+
+                string encodedText = System.Web.HttpUtility.HtmlEncode(textToShow.Trim())
+                    .Replace("\r\n", "<br>")
+                    .Replace("\r", "<br>")
+                    .Replace("\n", "<br>");
+
+                double textScale = GetWindowsTextScaleFactor();
+                double actualDpiScale = GetActualDpiScale();
+                double combinedScale = textScale * actualDpiScale;
+                double left = x / combinedScale;
+                double top = y / combinedScale;
+                double scaledWidth = width / combinedScale;
+                double scaledHeight = height / combinedScale;
+                double initialFontSize = Math.Max(8, Math.Min(128, scaledHeight * 0.7));
+
+                string rgbaString = $"rgba({bgColor.R},{bgColor.G},{bgColor.B},{bgColor.A / 255.0:F3})";
+                string styleAttr = $"left: {left}px; top: {top}px; width: {scaledWidth}px; height: {scaledHeight}px; " +
+                    $"box-shadow: inset 0 0 0 1000px {rgbaString}; " +
+                    $"background-color: transparent; " +
+                    $"color: rgb({textColor.R},{textColor.G},{textColor.B}); " +
+                    $"font-family: {string.Join(", ", fontFamily.Split(',').Select(f => $"\"{f.Trim()}\""))}; " +
+                    $"font-weight: {(isBold ? "bold" : "normal")}; " +
+                    $"font-size: {initialFontSize}px;";
+
+                string cssClass = displayOrientation == "vertical" ? "text-overlay vertical-text" : "text-overlay";
+                string jsId = System.Text.Json.JsonSerializer.Serialize(overlayId);
+                string jsCssClass = System.Text.Json.JsonSerializer.Serialize(cssClass);
+                string jsStyle = System.Text.Json.JsonSerializer.Serialize(styleAttr);
+                string jsText = System.Text.Json.JsonSerializer.Serialize(encodedText);
+
+                string script = $"addStreamingOverlay({jsId}, {jsCssClass}, {jsStyle}, {jsText});";
+                textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error adding MainWindow streaming overlay: {ex.Message}");
+            }
+        }
+
+        public void ClearStreamingOverlays()
+        {
+            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            {
+                return;
+            }
+
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(() => ClearStreamingOverlays(), DispatcherPriority.Send);
+                return;
+            }
+
+            try
+            {
+                textOverlayWebView.CoreWebView2.ExecuteScriptAsync("clearAllStreamingOverlays();");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error clearing MainWindow streaming overlays: {ex.Message}");
+            }
+        }
         
         private void UpdateMainWindowOverlayWebView()
         {
@@ -3634,6 +3782,11 @@ namespace UGTLive
             html.AppendLine("}");
             html.AppendLine(".text-overlay.playing {");
             html.AppendLine("  animation: playingPulse 1.2s ease-in-out infinite;");
+            html.AppendLine("}");
+            html.AppendLine(".streaming-overlay {");
+            html.AppendLine("  z-index: 50;");
+            html.AppendLine("  pointer-events: none !important;");
+            html.AppendLine("  user-select: none !important;");
             html.AppendLine("}");
             html.AppendLine("@keyframes playingPulse {");
             html.AppendLine("  0%, 100% { filter: drop-shadow(0 0 28px rgba(120, 220, 255, 0.9)) drop-shadow(0 0 12px rgba(100, 200, 255, 0.7)); }");
@@ -3831,6 +3984,32 @@ namespace UGTLive
                 html.AppendLine("  }");
                 html.AppendLine("});");
             }
+
+            html.AppendLine("");
+            html.AppendLine("function addStreamingOverlay(id, cssClass, styleAttr, encodedText) {");
+            html.AppendLine("  const overlayId = 'streaming-overlay-' + id;");
+            html.AppendLine("  let div = document.getElementById(overlayId);");
+            html.AppendLine("  if (!div) {");
+            html.AppendLine("    div = document.createElement('div');");
+            html.AppendLine("    div.id = overlayId;");
+            html.AppendLine("    div.setAttribute('data-streaming', 'true');");
+            html.AppendLine("    document.body.appendChild(div);");
+            html.AppendLine("  }");
+            html.AppendLine("  div.className = cssClass + ' streaming-overlay';");
+            html.AppendLine("  div.setAttribute('style', styleAttr);");
+            html.AppendLine("  let span = div.querySelector('.text-content');");
+            html.AppendLine("  if (!span) {");
+            html.AppendLine("    span = document.createElement('span');");
+            html.AppendLine("    span.className = 'text-content';");
+            html.AppendLine("    div.appendChild(span);");
+            html.AppendLine("  }");
+            html.AppendLine("  span.innerHTML = encodedText;");
+            html.AppendLine("  fitTextToBox(span, div);");
+            html.AppendLine("}");
+            html.AppendLine("");
+            html.AppendLine("function clearAllStreamingOverlays() {");
+            html.AppendLine("  document.querySelectorAll('[data-streaming=\"true\"]').forEach(node => node.remove());");
+            html.AppendLine("}");
             
             html.AppendLine("</script>");
             html.AppendLine("</head>");

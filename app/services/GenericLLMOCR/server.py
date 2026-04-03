@@ -76,7 +76,7 @@ MODE_OCR_TRANSLATE = "OCR + Translate"
 PROMPT_OCR_ONLY = (
     "You are an OCR engine. Detect every text region in the image.\n"
     "For EACH text region output EXACTLY one line in this format:\n"
-    "TEXT: <the text> | BBOX: [x1, y1, x2, y2]\n"
+    "BBOX: [x1, y1, x2, y2] | TEXT: <the text>\n"
     "where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner in pixel coordinates.\n"
     "Use the actual image pixel dimensions.\n"
     f"If no readable text is present, output EXACTLY {NO_TEXT_SENTINEL} and nothing else.\n"
@@ -88,7 +88,7 @@ PROMPT_OCR_TRANSLATE = (
     "You are an OCR and translation engine. Detect every text region in the image.\n"
     "First infer the likely overall context of the image and use it internally to choose accurate terminology and tone.\n"
     "For EACH text region output EXACTLY one line in this format:\n"
-    "TEXT: <translated text> | BBOX: [x1, y1, x2, y2]\n"
+    "BBOX: [x1, y1, x2, y2] | TEXT: <translated text>\n"
     "where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner in pixel coordinates.\n"
     "Use the actual image pixel dimensions.\n"
     "The TEXT field must contain ONLY the final translated text in the target language.\n"
@@ -155,11 +155,45 @@ LANGUAGE_NAME_MAP = {
 }
 
 TRANSLATION_PATTERN = re.compile(
-    r"TEXT:\s*(?P<text>[^|]+?)\s*\|\s*"
-    r"(?:(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated>[^|]+?)\s*\|\s*)?"
-    r"BBOX:\s*\[(?P<bbox>[^\]]+)\]",
+    r"^\s*(?:"
+    r"BBOX:\s*\[(?P<bbox_first>[^\]]+)\]\s*\|\s*"
+    r"TEXT:\s*(?P<text_after_bbox>.*?)(?:\s*\|\s*(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_after_bbox>.*?))?"
+    r"|"
+    r"TEXT:\s*(?P<text_before_bbox>.*?)\s*\|\s*"
+    r"(?:(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_before_bbox>.*?)\s*\|\s*)?"
+    r"BBOX:\s*\[(?P<bbox_after_text>[^\]]+)\]"
+    r")\s*$",
     re.IGNORECASE,
 )
+
+STREAMING_BBOX_PATTERN = re.compile(
+    r"^\s*BBOX:\s*\[(?P<bbox>[^\]]+)\]",
+    re.IGNORECASE,
+)
+
+
+def extract_translation_match_fields(match: re.Match) -> Tuple[str, str, str]:
+    raw_bbox = (match.group("bbox_first") or match.group("bbox_after_text") or "").strip()
+    llm_text = (match.group("text_after_bbox") or match.group("text_before_bbox") or "")
+    translated_text = (
+        match.group("translated_after_bbox")
+        or match.group("translated_before_bbox")
+        or ""
+    )
+    return raw_bbox, llm_text.replace("</s>", "").strip(), translated_text.replace("</s>", "").strip()
+
+
+def split_completed_response_lines(buffer: str) -> Tuple[List[str], str]:
+    completed_lines: List[str] = []
+    pending_line = ""
+
+    for line in buffer.splitlines(keepends=True):
+        if line.endswith(("\n", "\r")):
+            completed_lines.append(line.rstrip("\r\n"))
+        else:
+            pending_line = line
+
+    return completed_lines, pending_line
 
 
 def configure_runtime_logging() -> logging.Logger:
@@ -558,58 +592,16 @@ def process_llm_results(
     if not raw_response.strip() or is_no_text_response(raw_response):
         return text_objects
 
-    for match in TRANSLATION_PATTERN.finditer(raw_response):
-        llm_text = (match.group("text") or "").replace("</s>", "").strip()
-        translated_text = (match.group("translated") or "").replace("</s>", "").strip()
-        parsed_bbox = parse_bbox_values(match.group("bbox"), bbox_image_width, bbox_image_height)
-        bbox = None
-        if parsed_bbox is not None:
-            bbox = remap_bbox_to_source(
-                parsed_bbox,
-                bbox_image_width,
-                bbox_image_height,
-                image.width,
-                image.height,
-            )
-
-        if not llm_text or bbox is None:
-            continue
-
-        if is_no_text_response(llm_text) or (translated_text and is_no_text_response(translated_text)):
-            continue
-
-        text_value = llm_text
-        translated_value = ""
-
-        if mode == MODE_OCR_TRANSLATE:
-            translated_value = translated_text or llm_text
-            text_value = translated_value
-
-        x1, y1, x2, y2 = bbox
-        vertices = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
-
-        text_obj = {
-            "text": text_value,
-            "x": x1,
-            "y": y1,
-            "width": x2 - x1,
-            "height": y2 - y1,
-            "vertices": vertices,
-            "confidence": None,
-            "text_orientation": "horizontal",
-        }
-
-        if translated_value:
-            text_obj["translated_text"] = translated_value
-
-        try:
-            color_data = extract_foreground_background_colors(image, vertices)
-            if color_data:
-                attach_color_info(text_obj, color_data)
-        except Exception as exc:
-            LOGGER.warning("Color extraction failed: %s", exc)
-
-        text_objects.append(text_obj)
+    for raw_line in raw_response.splitlines():
+        text_obj = process_single_text_object(
+            raw_line,
+            image,
+            mode,
+            bbox_image_width,
+            bbox_image_height,
+        )
+        if text_obj is not None:
+            text_objects.append(text_obj)
 
     return text_objects
 
@@ -683,16 +675,19 @@ def analyze_color_sync(image_bytes: bytes) -> Dict:
 
 
 def process_single_text_object(
-    match: re.Match,
+    raw_line: str,
     image: Image.Image,
     mode: str,
     bbox_image_width: int,
     bbox_image_height: int,
 ) -> Optional[Dict]:
-    """Parse a single TRANSLATION_PATTERN match into a text object dict (or None)."""
-    llm_text = (match.group("text") or "").replace("</s>", "").strip()
-    translated_text = (match.group("translated") or "").replace("</s>", "").strip()
-    parsed_bbox = parse_bbox_values(match.group("bbox"), bbox_image_width, bbox_image_height)
+    """Parse a single OCR response line into a text object dict (or None)."""
+    match = TRANSLATION_PATTERN.match((raw_line or "").strip())
+    if match is None:
+        return None
+
+    raw_bbox, llm_text, translated_text = extract_translation_match_fields(match)
+    parsed_bbox = parse_bbox_values(raw_bbox, bbox_image_width, bbox_image_height)
     bbox = None
     if parsed_bbox is not None:
         bbox = remap_bbox_to_source(
@@ -741,6 +736,52 @@ def process_single_text_object(
         LOGGER.warning("Color extraction failed: %s", exc)
 
     return text_obj
+
+
+def process_partial_streaming_text_object(
+    raw_line: str,
+    image: Image.Image,
+    bbox_image_width: int,
+    bbox_image_height: int,
+) -> Optional[Dict]:
+    stripped_line = (raw_line or "").strip()
+    if not stripped_line:
+        return None
+
+    bbox_match = STREAMING_BBOX_PATTERN.match(stripped_line)
+    if bbox_match is None:
+        return None
+
+    parsed_bbox = parse_bbox_values(bbox_match.group("bbox"), bbox_image_width, bbox_image_height)
+    if parsed_bbox is None:
+        return None
+
+    bbox = remap_bbox_to_source(
+        parsed_bbox,
+        bbox_image_width,
+        bbox_image_height,
+        image.width,
+        image.height,
+    )
+    if bbox is None:
+        return None
+
+    text_value = ""
+    text_marker_match = re.search(r"\|\s*TEXT:\s*", stripped_line, re.IGNORECASE)
+    if text_marker_match is not None:
+        text_value = stripped_line[text_marker_match.end():].replace("</s>", "").strip()
+        if is_no_text_response(text_value):
+            return None
+
+    x1, y1, x2, y2 = bbox
+    return {
+        "text": text_value,
+        "x": x1,
+        "y": y1,
+        "width": x2 - x1,
+        "height": y2 - y1,
+        "text_orientation": "horizontal",
+    }
 
 
 def query_llm_streaming(
@@ -841,6 +882,8 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
 
     emitted_count = 0
+    pending_line = ""
+    last_preview_signature: Optional[Tuple[int, int, int, int, str]] = None
 
     # Yield a header event so the client knows streaming has started
     header = {
@@ -852,7 +895,7 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
     yield f"data: {_json.dumps(header)}\n\n"
 
     try:
-        for accumulated_text, delta_content, model, mode in query_llm_streaming(
+        for _accumulated_text, delta_content, model, mode in query_llm_streaming(
             llm_image_bytes,
             llm_image.width,
             llm_image.height,
@@ -864,22 +907,64 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
             delta_event = {"event": "llm_delta", "content": delta_content}
             yield f"data: {_json.dumps(delta_event)}\n\n"
 
-            # Try to parse any new complete lines from the accumulated text
-            matches = list(TRANSLATION_PATTERN.finditer(accumulated_text))
-            new_matches = matches[emitted_count:]
-            for match in new_matches:
+            # Wait for a full line terminator before parsing so bbox-first lines
+            # are not emitted while the TEXT field is still streaming in.
+            pending_line += delta_content
+            completed_lines, pending_line = split_completed_response_lines(pending_line)
+            for raw_line in completed_lines:
+                stream_id = f"stream_{emitted_count}"
                 text_obj = process_single_text_object(
-                    match, image, mode, llm_image.width, llm_image.height
+                    raw_line, image, mode, llm_image.width, llm_image.height
                 )
                 if text_obj is not None:
-                    event_data = {"event": "text_object", "data": text_obj}
+                    event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
                     yield f"data: {_json.dumps(event_data)}\n\n"
-                emitted_count = len(matches)
+                    emitted_count += 1
+                last_preview_signature = None
+
+            preview_obj = process_partial_streaming_text_object(
+                pending_line,
+                image,
+                llm_image.width,
+                llm_image.height,
+            )
+            if preview_obj is not None:
+                preview_signature = (
+                    int(preview_obj["x"]),
+                    int(preview_obj["y"]),
+                    int(preview_obj["width"]),
+                    int(preview_obj["height"]),
+                    preview_obj["text"],
+                )
+                if preview_signature != last_preview_signature:
+                    preview_event = {
+                        "event": "stream_preview",
+                        "stream_id": f"stream_{emitted_count}",
+                        "data": preview_obj,
+                    }
+                    yield f"data: {_json.dumps(preview_event)}\n\n"
+                    last_preview_signature = preview_signature
+            elif not pending_line.strip():
+                last_preview_signature = None
     except Exception as exc:
         LOGGER.exception("Streaming LLM request failed")
         error_data = {"event": "error", "message": str(exc)}
         yield f"data: {_json.dumps(error_data)}\n\n"
         return
+
+    if pending_line.strip():
+        stream_id = f"stream_{emitted_count}"
+        text_obj = process_single_text_object(
+            pending_line,
+            image,
+            mode,
+            llm_image.width,
+            llm_image.height,
+        )
+        if text_obj is not None:
+            event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
+            yield f"data: {_json.dumps(event_data)}\n\n"
+            emitted_count += 1
 
     # Final event
     done_data = {

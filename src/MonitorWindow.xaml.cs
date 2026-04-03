@@ -748,26 +748,63 @@ namespace UGTLive
         /// </summary>
         public void AddStreamingOverlay(TextObject textObj)
         {
+            AddStreamingOverlay(
+                textObj.ID,
+                textObj.Text,
+                textObj.TextTranslated,
+                textObj.X,
+                textObj.Y,
+                textObj.Width,
+                textObj.Height,
+                textObj.TextOrientation,
+                textObj.TextColor?.Color,
+                textObj.BackgroundColor?.Color);
+        }
+
+        public void AddStreamingOverlay(
+            string overlayId,
+            string sourceText,
+            string translatedText,
+            double x,
+            double y,
+            double width,
+            double height,
+            string textOrientation = "horizontal",
+            Color? foregroundColor = null,
+            Color? backgroundColor = null)
+        {
             if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
                 return;
 
             if (!Dispatcher.CheckAccess())
             {
-                Dispatcher.Invoke(() => AddStreamingOverlay(textObj), DispatcherPriority.Send);
+                Dispatcher.Invoke(
+                    () => AddStreamingOverlay(
+                        overlayId,
+                        sourceText,
+                        translatedText,
+                        x,
+                        y,
+                        width,
+                        height,
+                        textOrientation,
+                        foregroundColor,
+                        backgroundColor),
+                    DispatcherPriority.Send);
                 return;
             }
 
             try
             {
                 bool isTranslated = false;
-                string textToShow = textObj.Text;
-                string displayOrientation = textObj.TextOrientation;
+                string textToShow = sourceText ?? string.Empty;
+                string displayOrientation = textOrientation;
 
-                if (_currentOverlayMode == OverlayMode.Translated && !string.IsNullOrEmpty(textObj.TextTranslated))
+                if (_currentOverlayMode == OverlayMode.Translated && !string.IsNullOrEmpty(translatedText))
                 {
-                    textToShow = textObj.TextTranslated;
+                    textToShow = translatedText;
                     isTranslated = true;
-                    if (textObj.TextOrientation == "vertical")
+                    if (textOrientation == "vertical")
                     {
                         string targetLang = ConfigManager.Instance.GetTargetLanguage().ToLower();
                         if (!IsVerticalSupportedLanguage(targetLang))
@@ -779,7 +816,7 @@ namespace UGTLive
                 if (ConfigManager.Instance.IsMonitorOverrideBgColorEnabled())
                     bgColor = ConfigManager.Instance.GetMonitorOverrideBgColor();
                 else
-                    bgColor = textObj.BackgroundColor?.Color ?? Colors.Black;
+                    bgColor = backgroundColor ?? Colors.Black;
 
                 double bgOpacity = ConfigManager.Instance.GetMonitorBgOpacity();
                 byte alphaValue = (byte)(bgOpacity * 255);
@@ -789,7 +826,7 @@ namespace UGTLive
                 if (ConfigManager.Instance.IsMonitorOverrideFontColorEnabled())
                     textColor = ConfigManager.Instance.GetMonitorOverrideFontColor();
                 else
-                    textColor = textObj.TextColor?.Color ?? Colors.White;
+                    textColor = foregroundColor ?? Colors.White;
 
                 string fontFamily = isTranslated
                     ? ConfigManager.Instance.GetTargetLanguageFontFamily()
@@ -803,10 +840,8 @@ namespace UGTLive
                     .Replace("\r", "<br>")
                     .Replace("\n", "<br>");
 
-                double left = textObj.X;
-                double top = textObj.Y;
-                double width = textObj.Width;
-                double height = textObj.Height;
+                double left = x;
+                double top = y;
                 double initialFontSize = Math.Max(8, Math.Min(128, height * 0.7));
 
                 int borderRadius = ConfigManager.Instance.GetMonitorTextOverlayBorderRadius();
@@ -824,7 +859,7 @@ namespace UGTLive
 
                 // Use JsonSerializer.Serialize for proper Unicode escaping (à etc.)
                 // This ensures Vietnamese/CJK diacritics survive the ExecuteScriptAsync pipeline
-                string jsId = System.Text.Json.JsonSerializer.Serialize(textObj.ID);
+                string jsId = System.Text.Json.JsonSerializer.Serialize(overlayId);
                 string jsCssClass = System.Text.Json.JsonSerializer.Serialize(cssClass);
                 string jsStyle = System.Text.Json.JsonSerializer.Serialize(styleAttr);
                 string jsText = System.Text.Json.JsonSerializer.Serialize(encodedText);
@@ -980,6 +1015,11 @@ namespace UGTLive
             html.AppendLine("}");
             html.AppendLine(".text-overlay.playing {");
             html.AppendLine("  animation: playingPulse 1.2s ease-in-out infinite;");
+            html.AppendLine("}");
+            html.AppendLine(".streaming-overlay {");
+            html.AppendLine("  z-index: 50;");
+            html.AppendLine("  pointer-events: none !important;");
+            html.AppendLine("  user-select: none !important;");
             html.AppendLine("}");
             html.AppendLine("@keyframes playingPulse {");
             html.AppendLine("  0%, 100% { filter: drop-shadow(0 0 28px rgba(120, 220, 255, 0.9)) drop-shadow(0 0 12px rgba(100, 200, 255, 0.7)); }");
@@ -1193,25 +1233,28 @@ namespace UGTLive
             html.AppendLine("function addStreamingOverlay(id, cssClass, styleAttr, encodedText) {");
             html.AppendLine("  const container = document.getElementById('scroll-container');");
             html.AppendLine("  if (!container) return;");
-            html.AppendLine("  // Remove existing overlay with same id if present");
-            html.AppendLine("  const existing = document.getElementById('overlay-' + id);");
-            html.AppendLine("  if (existing) existing.remove();");
-            html.AppendLine("  const div = document.createElement('div');");
-            html.AppendLine("  div.id = 'overlay-' + id;");
-            html.AppendLine("  div.className = cssClass;");
+            html.AppendLine("  const overlayId = 'streaming-overlay-' + id;");
+            html.AppendLine("  let div = document.getElementById(overlayId);");
+            html.AppendLine("  if (!div) {");
+            html.AppendLine("    div = document.createElement('div');");
+            html.AppendLine("    div.id = overlayId;");
+            html.AppendLine("    div.setAttribute('data-streaming', 'true');");
+            html.AppendLine("    container.appendChild(div);");
+            html.AppendLine("  }");
+            html.AppendLine("  div.className = cssClass + ' streaming-overlay';");
             html.AppendLine("  div.setAttribute('style', styleAttr);");
-            html.AppendLine("  const span = document.createElement('span');");
-            html.AppendLine("  span.className = 'text-content';");
+            html.AppendLine("  let span = div.querySelector('.text-content');");
+            html.AppendLine("  if (!span) {");
+            html.AppendLine("    span = document.createElement('span');");
+            html.AppendLine("    span.className = 'text-content';");
+            html.AppendLine("    div.appendChild(span);");
+            html.AppendLine("  }");
             html.AppendLine("  span.innerHTML = encodedText;");
-            html.AppendLine("  div.appendChild(span);");
-            html.AppendLine("  container.appendChild(div);");
             html.AppendLine("  fitTextToBox(span, div);");
             html.AppendLine("}");
             html.AppendLine("");
             html.AppendLine("function clearAllStreamingOverlays() {");
-            html.AppendLine("  const container = document.getElementById('scroll-container');");
-            html.AppendLine("  if (!container) return;");
-            html.AppendLine("  while (container.firstChild) container.removeChild(container.firstChild);");
+            html.AppendLine("  document.querySelectorAll('[data-streaming=\"true\"]').forEach(node => node.remove());");
             html.AppendLine("}");
             html.AppendLine("</script>");
             html.AppendLine("</head>");

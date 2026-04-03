@@ -2306,6 +2306,53 @@ namespace UGTLive
             string targetLangParam = MapLanguageForService(ConfigManager.Instance.GetGenericLlmOcrTargetLanguage());
             string url = $"{service.ServerUrl}:{service.Port}/process_stream?lang={langParam}&target_lang={Uri.EscapeDataString(targetLangParam)}";
 
+            void ClearStreamingPreviewOverlays()
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    MonitorWindow.Instance?.ClearStreamingOverlays();
+                    MainWindow.Instance?.ClearStreamingOverlays();
+                }, DispatcherPriority.Send);
+            }
+
+            void UpsertStreamingPreviewOverlay(
+                string overlayId,
+                string text,
+                double x,
+                double y,
+                double width,
+                double height,
+                string textOrientation,
+                Color? foregroundColor,
+                Color? backgroundColor)
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    MonitorWindow.Instance?.AddStreamingOverlay(
+                        overlayId,
+                        text,
+                        text,
+                        x,
+                        y,
+                        width,
+                        height,
+                        textOrientation,
+                        foregroundColor,
+                        backgroundColor);
+                    MainWindow.Instance?.AddStreamingOverlay(
+                        overlayId,
+                        text,
+                        text,
+                        x,
+                        y,
+                        width,
+                        height,
+                        textOrientation,
+                        foregroundColor,
+                        backgroundColor);
+                }, DispatcherPriority.Send);
+            }
+
             try
             {
                 var content = new ByteArrayContent(imageBytes);
@@ -2327,6 +2374,7 @@ namespace UGTLive
                 }
 
                 Log($"Streaming: first byte from {serviceName} in {streamStopwatch.ElapsedMilliseconds} ms");
+                ClearStreamingPreviewOverlays();
 
                 // First pass: collect all text objects from the stream without rendering
                 // so we can hash them and skip if content hasn't changed
@@ -2350,6 +2398,7 @@ namespace UGTLive
                     if (sessionId != _overlaySessionId)
                     {
                         Log("Streaming: Session changed, aborting stream");
+                        ClearStreamingPreviewOverlays();
                         return false;
                     }
 
@@ -2370,10 +2419,65 @@ namespace UGTLive
 
                         string eventType = eventProp.GetString() ?? "";
 
-                        if (eventType == "text_object")
+                        static (double x, double y, double width, double height) ApplyTextAreaExpansion(
+                            double x,
+                            double y,
+                            double width,
+                            double height)
+                        {
+                            int expansionWidth = ConfigManager.Instance.GetMonitorTextAreaExpansionWidth();
+                            int expansionHeight = ConfigManager.Instance.GetMonitorTextAreaExpansionHeight();
+
+                            x -= expansionWidth / 2.0;
+                            width += expansionWidth;
+                            y -= expansionHeight / 2.0;
+                            height += expansionHeight;
+
+                            return (x, y, width, height);
+                        }
+
+                        if (eventType == "stream_preview")
                         {
                             if (!root.TryGetProperty("data", out var dataElement))
                                 continue;
+
+                            string streamId = root.TryGetProperty("stream_id", out var streamIdElement)
+                                ? streamIdElement.GetString() ?? string.Empty
+                                : string.Empty;
+                            if (string.IsNullOrWhiteSpace(streamId))
+                                continue;
+
+                            double x = dataElement.TryGetProperty("x", out var xEl) ? xEl.GetDouble() : 0;
+                            double y = dataElement.TryGetProperty("y", out var yEl) ? yEl.GetDouble() : 0;
+                            double width = dataElement.TryGetProperty("width", out var wEl) ? wEl.GetDouble() : 0;
+                            double height = dataElement.TryGetProperty("height", out var hEl) ? hEl.GetDouble() : 0;
+                            string previewText = dataElement.TryGetProperty("text", out var textEl)
+                                ? textEl.GetString() ?? string.Empty
+                                : string.Empty;
+                            string textOrientation = dataElement.TryGetProperty("text_orientation", out var orientEl)
+                                ? orientEl.GetString() ?? "horizontal"
+                                : "horizontal";
+
+                            (x, y, width, height) = ApplyTextAreaExpansion(x, y, width, height);
+                            UpsertStreamingPreviewOverlay(
+                                streamId,
+                                previewText,
+                                x,
+                                y,
+                                width,
+                                height,
+                                textOrientation,
+                                null,
+                                null);
+                        }
+                        else if (eventType == "text_object")
+                        {
+                            if (!root.TryGetProperty("data", out var dataElement))
+                                continue;
+
+                            string streamId = root.TryGetProperty("stream_id", out var streamIdElement)
+                                ? streamIdElement.GetString() ?? string.Empty
+                                : string.Empty;
 
                             // Extract text object fields
                             string text = dataElement.TryGetProperty("text", out var textEl) ? textEl.GetString() ?? "" : "";
@@ -2389,13 +2493,7 @@ namespace UGTLive
                             if (dataElement.TryGetProperty("text_orientation", out var orientEl))
                                 textOrientation = orientEl.GetString() ?? "horizontal";
 
-                            // Apply text area expansion
-                            int expansionWidth = ConfigManager.Instance.GetMonitorTextAreaExpansionWidth();
-                            int expansionHeight = ConfigManager.Instance.GetMonitorTextAreaExpansionHeight();
-                            x -= expansionWidth / 2.0;
-                            width += expansionWidth;
-                            y -= expansionHeight / 2.0;
-                            height += expansionHeight;
+                            (x, y, width, height) = ApplyTextAreaExpansion(x, y, width, height);
 
                             // Extract colors
                             Color? foregroundColor = null;
@@ -2412,6 +2510,20 @@ namespace UGTLive
                                 translatedText = transEl.GetString() ?? "";
                                 if (!string.IsNullOrEmpty(translatedText))
                                     includesTranslations = true;
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(streamId))
+                            {
+                                UpsertStreamingPreviewOverlay(
+                                    streamId,
+                                    translatedText.Length > 0 ? translatedText : text,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    textOrientation,
+                                    foregroundColor,
+                                    backgroundColor);
                             }
 
                             // Collect text data for hash comparison (render after stream completes)
@@ -2438,6 +2550,7 @@ namespace UGTLive
                         {
                             string errorMsg = root.TryGetProperty("message", out var msgEl) ? msgEl.GetString() ?? "Unknown" : "Unknown";
                             Log($"Streaming OCR error: {errorMsg}");
+                            ClearStreamingPreviewOverlays();
                             return false;
                         }
                     }
@@ -2467,6 +2580,7 @@ namespace UGTLive
                 {
                     if (ConfigManager.Instance.GetLogExtraDebugStuff())
                         Log($"Streaming: Content hash unchanged, skipping render. Hash: {streamHash.Substring(0, Math.Min(25, streamHash.Length))}...");
+                    ClearStreamingPreviewOverlays();
                     return true;
                 }
 
@@ -2509,6 +2623,8 @@ namespace UGTLive
                     MonitorWindow.Instance.ClearOverlayCache();
                     MonitorWindow.Instance.RefreshOverlays();
                     MainWindow.Instance.RefreshMainWindowOverlays();
+                    MonitorWindow.Instance.ClearStreamingOverlays();
+                    MainWindow.Instance.ClearStreamingOverlays();
                 });
 
                 // Trigger audio preloading
@@ -2566,6 +2682,7 @@ namespace UGTLive
             catch (Exception ex)
             {
                 Log($"Streaming OCR error: {ex.Message}");
+                ClearStreamingPreviewOverlays();
                 service.MarkAsNotRunning();
                 return false;
             }
