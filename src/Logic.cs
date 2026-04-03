@@ -596,6 +596,15 @@ namespace UGTLive
                                     _lastOcrHash = contentHash;
                                     bForceRender = true;
                                 }
+                                // Generic LLM OCR handles its own change detection; bypass settle time
+                                else if (ocrMethod == "Generic LLM OCR")
+                                {
+                                    _lastChangeTime = DateTime.MinValue;
+                                    _settlingStartTime = DateTime.MinValue;
+                                    _settlingHash = null;
+                                    _lastOcrHash = contentHash;
+                                    bForceRender = true;
+                                }
                                 // If OCR found no text, bypass settling — nothing to settle on
                                 else if (modifiedResults.GetArrayLength() == 0)
                                 {
@@ -2198,17 +2207,20 @@ namespace UGTLive
                 using var request = new HttpRequestMessage(HttpMethod.Post, url);
                 request.Content = content;
                 request.Headers.ConnectionClose = false;
+                var llmStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 var response = await _httpClient.SendAsync(request);
                 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Log($"HTTP request failed: {response.StatusCode}");
+                    Log($"HTTP request failed: {response.StatusCode} after {llmStopwatch.ElapsedMilliseconds} ms");
                     service.MarkAsNotRunning();
                     return null;
                 }
                 
                 // Get JSON response and return it directly
                 string jsonResponse = await response.Content.ReadAsStringAsync();
+                llmStopwatch.Stop();
+                Log($"LLM response received from {serviceName} in {llmStopwatch.ElapsedMilliseconds} ms: {jsonResponse.Substring(0, Math.Min(500, jsonResponse.Length))}");
                 
                 // Quick validation that we got valid JSON with expected structure
                 try
@@ -2304,14 +2316,17 @@ namespace UGTLive
                 request.Headers.ConnectionClose = false;
 
                 // Use ResponseHeadersRead so we can start reading the stream immediately
+                var streamStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 var response = await _streamingHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Log($"Streaming HTTP request failed: {response.StatusCode}");
+                    Log($"Streaming HTTP request failed: {response.StatusCode} after {streamStopwatch.ElapsedMilliseconds} ms");
                     service.MarkAsNotRunning();
                     return false;
                 }
+
+                Log($"Streaming: first byte from {serviceName} in {streamStopwatch.ElapsedMilliseconds} ms");
 
                 // First pass: collect all text objects from the stream without rendering
                 // so we can hash them and skip if content hasn't changed
@@ -2417,6 +2432,9 @@ namespace UGTLive
                         Log($"Streaming: Failed to parse SSE chunk: {ex.Message}");
                     }
                 }
+
+                streamStopwatch.Stop();
+                Log($"Streaming: total response from {serviceName} in {streamStopwatch.ElapsedMilliseconds} ms, {streamedTextData.Count} text objects");
 
                 // Generate content hash from streamed text using the same normalization as the non-streaming path
                 var hashBuilder = new StringBuilder();

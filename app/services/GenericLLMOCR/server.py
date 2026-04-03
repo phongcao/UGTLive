@@ -64,8 +64,8 @@ DEFAULT_API_BASE = "http://127.0.0.1:1234"
 DEFAULT_MODEL = "qwen2.5-vl-7b-instruct"
 DEFAULT_MODE = "OCR + Translate"
 DEFAULT_TARGET_LANGUAGE = "en"
-DEFAULT_MAX_IMAGE_DIMENSION = 1536 / 2
-DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 1800000 / 2
+DEFAULT_MAX_IMAGE_DIMENSION = 768
+DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000
 NO_TEXT_SENTINEL = "__UGTLIVE_NO_TEXT__"
 DEBUG_IMAGE_DIR = Path(__file__).parent / "debug"
 DEBUG_IMAGE_ENV_VAR = "UGTLIVE_VISUAL_STUDIO_DEBUG"
@@ -232,6 +232,10 @@ atexit.register(log_process_exit)
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_INSTALL_VERSION)
 OCR_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 
+# Reuse a single Session for all LLM requests (HTTP keep-alive / connection pooling)
+_LLM_SESSION = requests.Session()
+_LLM_SESSION.headers.update({"Content-Type": "application/json"})
+
 
 try:
     RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
@@ -299,10 +303,10 @@ def build_endpoint(api_base: str) -> str:
 
 def build_prompt(mode: str, width: int, height: int, source_lang: str, target_lang: str) -> str:
     if mode == MODE_OCR_ONLY:
-        return f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. {PROMPT_OCR_ONLY}"
+        return f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. {PROMPT_OCR_ONLY} /no_think"
     return (
         f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. "
-        f"Translate all detected text to {get_language_name(target_lang)}. {PROMPT_OCR_TRANSLATE}"
+        f"Translate all detected text to {get_language_name(target_lang)}. {PROMPT_OCR_TRANSLATE} /no_think"
     )
 
 
@@ -490,6 +494,10 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
         "max_tokens": 4096,
     }
 
+    # Disable thinking/reasoning on models that support it (e.g. Qwen3/3.5)
+    # to avoid hidden chain-of-thought overhead that dramatically increases latency.
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
+
     headers = {"Content-Type": "application/json"}
     if api_key and not api_key.startswith("<your"):
         headers["Authorization"] = f"Bearer {api_key}"
@@ -508,7 +516,7 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
     )
 
     try:
-        response = requests.post(endpoint, json=payload, headers=headers, timeout=180)
+        response = _LLM_SESSION.post(endpoint, json=payload, headers=headers, timeout=180)
         response.raise_for_status()
     except requests.RequestException:
         LOGGER.exception(
@@ -522,14 +530,19 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
 
     response_json = response.json()
     content = response_json["choices"][0]["message"]["content"]
+    usage = response_json.get("usage", {})
     LOGGER.info(
-        "LLM request complete model=%s mode=%s status=%s duration_ms=%.1f response_chars=%s",
+        "LLM request complete model=%s mode=%s status=%s duration_ms=%.1f response_chars=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
         model,
         mode,
         response.status_code,
         (time.time() - request_started) * 1000.0,
         len(content or ""),
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
     )
+    LOGGER.info("LLM raw response: %s", content)
     return content, model, mode
 
 
@@ -605,11 +618,20 @@ def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -
     start_time = time.time()
     runtime_config = load_runtime_settings()
 
+    t0 = time.time()
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     save_debug_request_image(image, source_lang)
     llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
     if llm_image.size != image.size:
         save_debug_request_image(llm_image, source_lang, prefix="request_llm")
+    t_prep = time.time()
+    LOGGER.info(
+        "Timing: image_prep=%.1fms input=%sx%s llm=%sx%s payload_bytes=%s",
+        (t_prep - t0) * 1000.0,
+        image.width, image.height,
+        llm_image.width, llm_image.height,
+        len(llm_image_bytes),
+    )
 
     raw_response, model, mode = query_llm(
         llm_image_bytes,
@@ -619,12 +641,23 @@ def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -
         source_lang,
         target_lang,
     )
+    t_llm = time.time()
+
     text_objects = process_llm_results(
         image,
         raw_response,
         mode,
         llm_image.width,
         llm_image.height,
+    )
+    t_post = time.time()
+    LOGGER.info(
+        "Timing: image_prep=%.1fms llm_call=%.1fms post_process=%.1fms total=%.1fms response_chars=%s",
+        (t_prep - t0) * 1000.0,
+        (t_llm - t_prep) * 1000.0,
+        (t_post - t_llm) * 1000.0,
+        (t_post - start_time) * 1000.0,
+        len(raw_response),
     )
 
     return {
@@ -745,6 +778,9 @@ def query_llm_streaming(
         "stream": True,
     }
 
+    # Disable thinking/reasoning on models that support it (e.g. Qwen3/3.5)
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
+
     headers = {"Content-Type": "application/json"}
     if api_key and not api_key.startswith("<your"):
         headers["Authorization"] = f"Bearer {api_key}"
@@ -755,7 +791,7 @@ def query_llm_streaming(
         model, mode, endpoint, width, height,
     )
 
-    response = requests.post(endpoint, json=payload, headers=headers, timeout=180, stream=True)
+    response = _LLM_SESSION.post(endpoint, json=payload, headers=headers, timeout=180, stream=True)
     response.raise_for_status()
     response.encoding = "utf-8"
 
