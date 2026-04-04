@@ -116,6 +116,11 @@
                       Margin="4,2" FontSize="11"
                       Checked="MousePassthroughCheckBox_Changed" Unchecked="MousePassthroughCheckBox_Changed"/>
 
+            <CheckBox x:Name="genericLlmIgnoreMenusCheckBox" Content="Ignore menus" Foreground="White"
+                      Margin="4,2" FontSize="11"
+                      ToolTip="Generic LLM OCR: ignore routine in-game menu or UI text and focus on dialogue or other important text"
+                      Checked="GenericLlmIgnoreMenusCheckBox_Changed" Unchecked="GenericLlmIgnoreMenusCheckBox_Changed"/>
+
             <!-- Separator -->
             <Rectangle Height="1" Fill="#40FFFFFF" Margin="4,3"/>
 

@@ -64,6 +64,7 @@ DEFAULT_API_BASE = "http://127.0.0.1:1234"
 DEFAULT_MODEL = "qwen2.5-vl-7b-instruct"
 DEFAULT_MODE = "OCR + Translate"
 DEFAULT_TARGET_LANGUAGE = "en"
+DEFAULT_IGNORE_MENU_TEXT = False
 DEFAULT_MAX_IMAGE_DIMENSION = 768
 DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000
 NO_TEXT_SENTINEL = "__UGTLIVE_NO_TEXT__"
@@ -72,6 +73,14 @@ DEBUG_IMAGE_ENV_VAR = "UGTLIVE_VISUAL_STUDIO_DEBUG"
 
 MODE_OCR_ONLY = "OCR Only"
 MODE_OCR_TRANSLATE = "OCR + Translate"
+
+PROMPT_IGNORE_COMMON_MENU_TEXT = (
+    "Ignore routine in-game menu and UI text that is generic or repeatedly present across frames, "
+    "such as Save, Load, Settings, Back, Exit, etc. "
+    "Focus on character dialogue, subtitles, narration, quest text, cutscene text, "
+    "and choice prompts that matter to the player. "
+    f"If the image only contains ignorable menu or UI text, output EXACTLY {NO_TEXT_SENTINEL} and nothing else."
+)
 
 PROMPT_OCR_ONLY = (
     "You are an OCR engine. Detect every text region in the image.\n"
@@ -324,6 +333,14 @@ def get_target_language(request: Request, runtime_config: Dict[str, str]) -> str
     return fallback_target or DEFAULT_TARGET_LANGUAGE
 
 
+def is_ignore_menu_text_enabled(runtime_config: Dict[str, str]) -> bool:
+    value = runtime_config.get(
+        "generic_llm_ocr_ignore_menu_text",
+        str(DEFAULT_IGNORE_MENU_TEXT).lower(),
+    )
+    return (value or "").strip().lower() == "true"
+
+
 def build_endpoint(api_base: str) -> str:
     base = (api_base or DEFAULT_API_BASE).strip().rstrip("/")
     if base.endswith("/v1/chat/completions"):
@@ -335,12 +352,24 @@ def build_endpoint(api_base: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
-def build_prompt(mode: str, width: int, height: int, source_lang: str, target_lang: str) -> str:
+def build_prompt(
+    mode: str,
+    width: int,
+    height: int,
+    source_lang: str,
+    target_lang: str,
+    ignore_menu_text: bool,
+) -> str:
+    ignore_menu_text_prompt = f"{PROMPT_IGNORE_COMMON_MENU_TEXT} " if ignore_menu_text else ""
     if mode == MODE_OCR_ONLY:
-        return f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. {PROMPT_OCR_ONLY} /no_think"
+        return (
+            f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. "
+            f"{ignore_menu_text_prompt}{PROMPT_OCR_ONLY} /no_think"
+        )
     return (
         f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. "
-        f"Translate all detected text to {get_language_name(target_lang)}. {PROMPT_OCR_TRANSLATE} /no_think"
+        f"Translate all detected text to {get_language_name(target_lang)}. "
+        f"{ignore_menu_text_prompt}{PROMPT_OCR_TRANSLATE} /no_think"
     )
 
 
@@ -506,9 +535,10 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
     api_key = runtime_config.get("generic_llm_ocr_api_key", "")
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
     mode = normalize_mode(runtime_config.get("generic_llm_ocr_mode", DEFAULT_MODE))
+    ignore_menu_text = is_ignore_menu_text_enabled(runtime_config)
 
     endpoint = build_endpoint(api_base)
-    prompt = build_prompt(mode, width, height, source_lang, target_lang)
+    prompt = build_prompt(mode, width, height, source_lang, target_lang, ignore_menu_text)
 
     # Convert the raw image to a data URL for OpenAI-compatible chat-completions vision APIs.
     image_data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
@@ -538,9 +568,10 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
 
     request_started = time.time()
     LOGGER.info(
-        "LLM request start model=%s mode=%s endpoint=%s image=%sx%s source_lang=%s target_lang=%s payload_bytes=%s",
+        "LLM request start model=%s mode=%s ignore_menu_text=%s endpoint=%s image=%sx%s source_lang=%s target_lang=%s payload_bytes=%s",
         model,
         mode,
+        ignore_menu_text,
         endpoint,
         width,
         height,
@@ -797,9 +828,10 @@ def query_llm_streaming(
     api_key = runtime_config.get("generic_llm_ocr_api_key", "")
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
     mode = normalize_mode(runtime_config.get("generic_llm_ocr_mode", DEFAULT_MODE))
+    ignore_menu_text = is_ignore_menu_text_enabled(runtime_config)
 
     endpoint = build_endpoint(api_base)
-    prompt = build_prompt(mode, width, height, source_lang, target_lang)
+    prompt = build_prompt(mode, width, height, source_lang, target_lang, ignore_menu_text)
 
     image_data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
 
@@ -828,8 +860,8 @@ def query_llm_streaming(
 
     request_started = time.time()
     LOGGER.info(
-        "LLM streaming request start model=%s mode=%s endpoint=%s image=%sx%s",
-        model, mode, endpoint, width, height,
+        "LLM streaming request start model=%s mode=%s ignore_menu_text=%s endpoint=%s image=%sx%s",
+        model, mode, ignore_menu_text, endpoint, width, height,
     )
 
     response = _LLM_SESSION.post(endpoint, json=payload, headers=headers, timeout=180, stream=True)

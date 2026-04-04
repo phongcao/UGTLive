@@ -199,6 +199,7 @@ namespace UGTLive
         private System.Windows.Controls.RadioButton? overlaySourceRadio => _toolbarWindow?.overlaySourceRadio;
         private System.Windows.Controls.RadioButton? overlayTranslatedRadio => _toolbarWindow?.overlayTranslatedRadio;
         private System.Windows.Controls.CheckBox? mousePassthroughCheckBox => _toolbarWindow?.mousePassthroughCheckBox;
+        private System.Windows.Controls.CheckBox? genericLlmIgnoreMenusCheckBox => _toolbarWindow?.genericLlmIgnoreMenusCheckBox;
 
         //allow this to be accesible through an "Instance" variable
         public static MainWindow Instance { get { return _this!; } }
@@ -826,6 +827,9 @@ namespace UGTLive
                 
             if (mousePassthroughCheckBox != null)
                 mousePassthroughCheckBox.ToolTip = $"Toggle mouse passthrough mode{GetHotkeyString("toggle_passthrough")}";
+
+            if (genericLlmIgnoreMenusCheckBox != null)
+                genericLlmIgnoreMenusCheckBox.ToolTip = "Generic LLM OCR: ignore routine in-game menu or UI text and focus on dialogue or other important text";
             
             if (snapshotButton != null)
                 snapshotButton.ToolTip = $"Snap: Single OCR capture{GetHotkeyString("snapshot")}";
@@ -849,6 +853,7 @@ namespace UGTLive
             { 
                 toggleButton, snapshotButton, monitorButton, chatBoxButton, settingsButton, logButton, 
                 listenButton, exportButton, hideButton, mousePassthroughCheckBox,
+                genericLlmIgnoreMenusCheckBox,
                 overlayHideRadio, overlaySourceRadio, overlayTranslatedRadio
             };
             
@@ -1033,6 +1038,10 @@ namespace UGTLive
             mousePassthroughCheckBox.IsChecked = mousePassthrough;
             updateMousePassthrough(mousePassthrough);
             Console.WriteLine($"MainWindow mouse passthrough restored: {(mousePassthrough ? "enabled" : "disabled")}");
+
+            bool ignoreMenus = ConfigManager.Instance.IsGenericLlmOcrIgnoreMenuTextEnabled();
+            genericLlmIgnoreMenusCheckBox.IsChecked = ignoreMenus;
+            Console.WriteLine($"Generic LLM OCR ignore menus restored: {(ignoreMenus ? "enabled" : "disabled")}");
         }
 
         /// <summary>
@@ -5194,6 +5203,13 @@ namespace UGTLive
             BringToFront();
             Console.WriteLine($"Mouse passthrough {(isEnabled ? "enabled" : "disabled")}");
         }
+
+        public void HandleGenericLlmOcrIgnoreMenusChanged(bool isEnabled)
+        {
+            ConfigManager.Instance.SetGenericLlmOcrIgnoreMenuTextEnabled(isEnabled);
+            BringToFront();
+            Console.WriteLine($"Generic LLM OCR ignore menus {(isEnabled ? "enabled" : "disabled")}");
+        }
         
         // Helper method to update mouse passthrough state
         private void updateMousePassthrough(bool enabled)
@@ -5600,6 +5616,7 @@ namespace UGTLive
 
             CleanupDuplicateToolbars();
             UpdateToolbarPosition();
+            _toolbarWindow?.SyncGenericLlmIgnoreMenus(ConfigManager.Instance.IsGenericLlmOcrIgnoreMenuTextEnabled());
         }
 
         private void UpdateToolbarPosition()

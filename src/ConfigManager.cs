@@ -58,6 +58,7 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_MODEL = "generic_llm_ocr_model";
         public const string GENERIC_LLM_OCR_MODE = "generic_llm_ocr_mode";
         public const string GENERIC_LLM_OCR_TARGET_LANGUAGE = "generic_llm_ocr_target_language";
+        public const string GENERIC_LLM_OCR_IGNORE_MENU_TEXT = "generic_llm_ocr_ignore_menu_text";
         public const string GENERIC_LLM_OCR_FOCUS_MODE = "generic_llm_ocr_focus_mode";
         public const string GENERIC_LLM_OCR_STREAMING = "generic_llm_ocr_streaming";
         public const string GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES = "generic_llm_ocr_detect_image_changes";
@@ -482,6 +483,12 @@ namespace UGTLive
                 changed = true;
             }
 
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_IGNORE_MENU_TEXT))
+            {
+                _configValues[GENERIC_LLM_OCR_IGNORE_MENU_TEXT] = "false";
+                changed = true;
+            }
+
             return changed;
         }
 
@@ -611,6 +618,7 @@ namespace UGTLive
             _configValues[GENERIC_LLM_OCR_MODEL] = "qwen2.5-vl-7b-instruct";
             _configValues[GENERIC_LLM_OCR_MODE] = "OCR + Translate";
             _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = "en";
+            _configValues[GENERIC_LLM_OCR_IGNORE_MENU_TEXT] = "false";
             _configValues[BLOCK_DETECTION_SCALE] = "3.00";
             _configValues[BLOCK_DETECTION_SETTLE_TIME] = "0.15";
             _configValues[BLOCK_DETECTION_MAX_SETTLE_TIME] = "1.00";
@@ -1089,6 +1097,17 @@ namespace UGTLive
                 _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = language.Trim();
                 SaveConfig();
             }
+        }
+
+        public bool IsGenericLlmOcrIgnoreMenuTextEnabled()
+        {
+            return GetBoolValue(GENERIC_LLM_OCR_IGNORE_MENU_TEXT, false);
+        }
+
+        public void SetGenericLlmOcrIgnoreMenuTextEnabled(bool enabled)
+        {
+            _configValues[GENERIC_LLM_OCR_IGNORE_MENU_TEXT] = enabled.ToString().ToLowerInvariant();
+            SaveConfig();
         }
 
         public string GetGenericLlmOcrFocusMode()

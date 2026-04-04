@@ -239,6 +239,12 @@ namespace UGTLive
             MainWindow.Instance?.HandlePassthroughChanged(mousePassthroughCheckBox.IsChecked ?? false);
         }
 
+        private void GenericLlmIgnoreMenusCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!_isInitialized) return;
+            MainWindow.Instance?.HandleGenericLlmOcrIgnoreMenusChanged(genericLlmIgnoreMenusCheckBox.IsChecked ?? false);
+        }
+
         // --- Sync state from MainWindow ---
 
         public void SyncOverlayMode(string mode)
@@ -263,6 +269,13 @@ namespace UGTLive
         {
             _isInitialized = false;
             mousePassthroughCheckBox.IsChecked = enabled;
+            _isInitialized = true;
+        }
+
+        public void SyncGenericLlmIgnoreMenus(bool enabled)
+        {
+            _isInitialized = false;
+            genericLlmIgnoreMenusCheckBox.IsChecked = enabled;
             _isInitialized = true;
         }
     }
