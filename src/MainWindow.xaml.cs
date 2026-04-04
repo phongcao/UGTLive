@@ -2262,11 +2262,22 @@ namespace UGTLive
             if (captureRect.Width < 1 || captureRect.Height < 1) return;
 
             bool needsCleanCaptureForOcr = GetIsStarted() && GetOCRCheckIsWanted();
+            string ocrMethod = GetSelectedOcrMethod();
+            bool isGenericLlmStreamingHashCheck =
+                string.Equals(ocrMethod, "Generic LLM OCR", StringComparison.OrdinalIgnoreCase) &&
+                ConfigManager.Instance.IsGenericLlmOcrStreamingEnabled() &&
+                ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled();
+            bool suppressMainWindowOverlay = needsCleanCaptureForOcr && !isGenericLlmStreamingHashCheck;
+
+            if (needsCleanCaptureForOcr && isGenericLlmStreamingHashCheck && ConfigManager.Instance.GetLogExtraDebugStuff())
+            {
+                Console.WriteLine("Generic LLM OCR streaming: capture compare will not hide OverlayContent to avoid visible blinking");
+            }
 
             // Create bitmap with window dimensions
             using (Bitmap bitmap = new Bitmap(captureRect.Width, captureRect.Height))
             {
-                if (!TryCopyCaptureRectToBitmap(bitmap, needsCleanCaptureForOcr, "screen capture"))
+                if (!TryCopyCaptureRectToBitmap(bitmap, suppressMainWindowOverlay, "screen capture"))
                 {
                     return;
                 }
@@ -2311,7 +2322,6 @@ namespace UGTLive
                     }
 
                     // Check if we're using Windows OCR or Google Vision - if so, process in memory without saving
-                    string ocrMethod = GetSelectedOcrMethod();
                     if (ocrMethod == "Windows OCR")
                     {
                         string sourceLanguage = ConfigManager.Instance.GetSourceLanguage();
@@ -2326,7 +2336,26 @@ namespace UGTLive
                     {
                         // Send directly to HTTP service logic
                         // The logic will handle cloning the bitmap and converting to bytes
-                        Logic.Instance.SendImageToHttpOCR(bitmap);
+                        if (isGenericLlmStreamingHashCheck)
+                        {
+                            System.Drawing.Bitmap? CaptureCleanBitmapForGenericLlmStreaming()
+                            {
+                                var cleanBitmap = new Bitmap(captureRect.Width, captureRect.Height);
+                                if (!TryCopyCaptureRectToBitmap(cleanBitmap, suppressMainWindowOverlay: true, errorContext: "Generic LLM OCR clean recapture"))
+                                {
+                                    cleanBitmap.Dispose();
+                                    return null;
+                                }
+
+                                return cleanBitmap;
+                            }
+
+                            Logic.Instance.SendImageToHttpOCR(bitmap, CaptureCleanBitmapForGenericLlmStreaming);
+                        }
+                        else
+                        {
+                            Logic.Instance.SendImageToHttpOCR(bitmap);
+                        }
                     }
                 }
                 catch (Exception ex)

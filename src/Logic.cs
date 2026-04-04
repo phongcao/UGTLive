@@ -8,6 +8,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using System.Security.Cryptography;
+using System.Runtime.CompilerServices;
 using Application = System.Windows.Application;
 using Color = System.Windows.Media.Color;
 using MessageBox = System.Windows.MessageBox;
@@ -54,6 +56,9 @@ namespace UGTLive
         
         // Session ID to track validity of OCR requests
         private long _overlaySessionId = 0;
+        private byte[]? _lastGenericLlmOcrFrameHash = null;
+        private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 3;
+        private const string GENERIC_LLM_OCR_FOCUS_MODE_REGION = "Region";
 
         // Track the current capture position
         private int _currentCaptureX;
@@ -286,14 +291,194 @@ namespace UGTLive
             RefreshOCRStatusDisplay();
         }
 
-        public void ResetHash()
+        private static string FormatGenericLlmOcrHashPreview(byte[]? hash)
         {
+            if (hash == null || hash.Length == 0)
+            {
+                return "none";
+            }
+
+            int previewLength = Math.Min(4, hash.Length);
+            return BitConverter.ToString(hash, 0, previewLength).Replace("-", string.Empty);
+        }
+
+        public void ResetHash([CallerMemberName] string caller = "")
+        {
+            if (_lastGenericLlmOcrFrameHash != null)
+            {
+                Log($"[GLLM HASH] reset caller={caller} overlaySession={_overlaySessionId} previousFrameHash={FormatGenericLlmOcrHashPreview(_lastGenericLlmOcrFrameHash)}");
+            }
+
             // Force mismatch on next comparison by using a unique string
             _lastOcrHash = "RESET_" + Guid.NewGuid().ToString();
+            _lastGenericLlmOcrFrameHash = null;
             _settlingHash = null;
             _lastChangeTime = DateTime.Now;
             _settlingStartTime = DateTime.MinValue; // Ensure settling restarts clean
             _lastTranslationTime = DateTime.MinValue; // Clear cooldown on reset
+        }
+
+        private static System.Drawing.Rectangle GetGenericLlmOcrComparisonCropRect(System.Drawing.Bitmap sourceBitmap)
+        {
+            int width = sourceBitmap.Width;
+            int height = sourceBitmap.Height;
+
+            if (width <= 1 || height <= 1)
+            {
+                return new System.Drawing.Rectangle(0, 0, Math.Max(1, width), Math.Max(1, height));
+            }
+
+            string focusMode = ConfigManager.Instance.GetGenericLlmOcrFocusMode();
+            if (!string.Equals(focusMode, GENERIC_LLM_OCR_FOCUS_MODE_REGION, StringComparison.OrdinalIgnoreCase))
+            {
+                return new System.Drawing.Rectangle(0, 0, width, height);
+            }
+
+            int left = Math.Max(0, (int)Math.Round(width * 0.05));
+            int right = Math.Min(width, width - left);
+            int top = Math.Max(0, (int)Math.Round(height * 0.60));
+            int croppedWidth = Math.Max(1, right - left);
+            int croppedHeight = Math.Max(1, height - top);
+
+            return new System.Drawing.Rectangle(left, top, croppedWidth, croppedHeight);
+        }
+
+        private byte[] ComputeGenericLlmOcrFrameHash(
+            byte[] imageBytes,
+            out System.Drawing.Rectangle comparisonRect,
+            out System.Drawing.Size sourceSize)
+        {
+            using var inputStream = new MemoryStream(imageBytes);
+            using var sourceBitmap = new System.Drawing.Bitmap(inputStream);
+            sourceSize = sourceBitmap.Size;
+            comparisonRect = GetGenericLlmOcrComparisonCropRect(sourceBitmap);
+            using var croppedBitmap = sourceBitmap.Clone(comparisonRect, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            const int targetWidth = 16;
+            const int targetHeight = 16;
+
+            using var downscaledBitmap = new System.Drawing.Bitmap(targetWidth, targetHeight, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (var graphics = System.Drawing.Graphics.FromImage(downscaledBitmap))
+            {
+                graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                graphics.DrawImage(croppedBitmap, new System.Drawing.Rectangle(0, 0, targetWidth, targetHeight));
+            }
+
+            byte[] luminanceBytes = new byte[targetWidth * targetHeight];
+            int luminanceSum = 0;
+            int index = 0;
+            for (int y = 0; y < targetHeight; y++)
+            {
+                for (int x = 0; x < targetWidth; x++)
+                {
+                    System.Drawing.Color pixel = downscaledBitmap.GetPixel(x, y);
+                    byte luminance = (byte)((pixel.R * 299 + pixel.G * 587 + pixel.B * 114) / 1000);
+                    luminanceBytes[index++] = luminance;
+                    luminanceSum += luminance;
+                }
+            }
+
+            int averageLuminance = luminanceSum / luminanceBytes.Length;
+            byte[] hashBytes = new byte[luminanceBytes.Length / 8];
+
+            for (int i = 0; i < luminanceBytes.Length; i++)
+            {
+                if (luminanceBytes[i] >= averageLuminance)
+                {
+                    hashBytes[i / 8] |= (byte)(1 << (7 - (i % 8)));
+                }
+            }
+
+            return hashBytes;
+        }
+
+        private static int CountSetBits(byte value)
+        {
+            int count = 0;
+            while (value != 0)
+            {
+                count += value & 1;
+                value >>= 1;
+            }
+            return count;
+        }
+
+        private static int ComputeHammingDistance(byte[] left, byte[] right)
+        {
+            int length = Math.Min(left.Length, right.Length);
+            int distance = 0;
+            for (int i = 0; i < length; i++)
+            {
+                distance += CountSetBits((byte)(left[i] ^ right[i]));
+            }
+
+            distance += Math.Abs(left.Length - right.Length) * 8;
+            return distance;
+        }
+
+        private bool ShouldSkipGenericLlmOcrStreamingFrame(byte[] imageBytes)
+        {
+            if (!ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled())
+            {
+                Log("[GLLM HASH] compare detect_changes=false decision=SEND");
+                return false;
+            }
+
+            try
+            {
+                byte[] frameHash = ComputeGenericLlmOcrFrameHash(imageBytes, out var comparisonRect, out var sourceSize);
+                int hashDifference = int.MaxValue;
+                bool matchesPreviousFrame = _lastGenericLlmOcrFrameHash != null;
+                string previousHashPreview = FormatGenericLlmOcrHashPreview(_lastGenericLlmOcrFrameHash);
+                string currentHashPreview = FormatGenericLlmOcrHashPreview(frameHash);
+                string focusMode = ConfigManager.Instance.GetGenericLlmOcrFocusMode();
+
+                if (_lastGenericLlmOcrFrameHash != null)
+                {
+                    hashDifference = ComputeHammingDistance(frameHash, _lastGenericLlmOcrFrameHash);
+                    matchesPreviousFrame = hashDifference <= GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD;
+                }
+
+                _lastGenericLlmOcrFrameHash = frameHash;
+
+                if (previousHashPreview == "none")
+                {
+                    Log(
+                        $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
+                        $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
+                        $"prev=none current={currentHashPreview} decision=BASELINE_SEND");
+                    return false;
+                }
+
+                Log(
+                    $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
+                    $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
+                    $"prev={previousHashPreview} current={currentHashPreview} diff={hashDifference} " +
+                    $"threshold={GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD} decision={(matchesPreviousFrame ? "SKIP" : "SEND")}");
+
+                if (matchesPreviousFrame && ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    Log($"Streaming: Skipping Generic LLM OCR frame with image-hash difference {hashDifference} using focus mode '{ConfigManager.Instance.GetGenericLlmOcrFocusMode()}'");
+                }
+
+                return matchesPreviousFrame;
+            }
+            catch (Exception ex)
+            {
+                Log($"[GLLM HASH] compare error decision=SEND message={ex.Message}");
+                return false;
+            }
+        }
+
+        private static byte[] ConvertBitmapToPngBytes(System.Drawing.Bitmap sourceBitmap)
+        {
+            using var ms = new MemoryStream();
+            sourceBitmap.Save(ms, ImageFormat.Png);
+            return ms.ToArray();
         }
         
         // Prepare for snapshot OCR, bypassing settling delays
@@ -2868,24 +3053,14 @@ namespace UGTLive
         }
 
         // Called when a screenshot is captured (sends directly to HTTP service)
-        public async void SendImageToHttpOCR(System.Drawing.Bitmap bitmap)
+        public async void SendImageToHttpOCR(System.Drawing.Bitmap bitmap, Func<System.Drawing.Bitmap?>? cleanBitmapProvider = null)
         {
-            // Clone the bitmap immediately to avoid race conditions
             System.Drawing.Bitmap? bitmapClone = null;
             byte[] imageBytes;
             
             try
             {
-                // Clone and store for color analysis
-                bitmapClone = (System.Drawing.Bitmap)bitmap.Clone();
-                SetCurrentProcessingBitmap(bitmapClone);
-                
-                // Convert to bytes for HTTP request
-                using (var ms = new MemoryStream())
-                {
-                    bitmapClone.Save(ms, ImageFormat.Png);
-                    imageBytes = ms.ToArray();
-                }
+                imageBytes = ConvertBitmapToPngBytes(bitmap);
             }
             catch (Exception ex)
             {
@@ -2934,6 +3109,37 @@ namespace UGTLive
                     if (ocrMethod == "Generic LLM OCR" && ConfigManager.Instance.IsGenericLlmOcrStreamingEnabled())
                     {
                         long currentSessionId = _overlaySessionId;
+                        Log($"[GLLM HASH] streaming_check overlaySession={currentSessionId} bytes={imageBytes.Length} detect_changes={ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled()} focus={ConfigManager.Instance.GetGenericLlmOcrFocusMode()}");
+
+                        if (ShouldSkipGenericLlmOcrStreamingFrame(imageBytes))
+                        {
+                            ClearCurrentProcessingBitmap();
+                            MainWindow.Instance.SetOCRCheckIsWanted(true);
+                            NotifyOCRCompleted();
+                            OnFinishedThings(true, skipOverlayRefresh: true);
+                            return;
+                        }
+
+                        if (cleanBitmapProvider != null)
+                        {
+                            using System.Drawing.Bitmap? cleanBitmap = cleanBitmapProvider();
+                            if (cleanBitmap != null)
+                            {
+                                imageBytes = ConvertBitmapToPngBytes(cleanBitmap);
+                                bitmapClone = (System.Drawing.Bitmap)cleanBitmap.Clone();
+                                SetCurrentProcessingBitmap(bitmapClone);
+
+                                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                                {
+                                    Log($"[GLLM HASH] clean_recapture bytes={imageBytes.Length} decision=SEND");
+                                }
+                            }
+                            else if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                            {
+                                Log("[GLLM HASH] clean_recapture failed, falling back to original capture");
+                            }
+                        }
+
                         Log("Using streaming OCR path for Generic LLM OCR");
                         bool streamSuccess = await ProcessImageStreamingAsync(imageBytes, ocrMethod, sourceLanguage);
 
@@ -2958,6 +3164,12 @@ namespace UGTLive
                             OnFinishedThings(true, skipOverlayRefresh: true);
                             return;
                         }
+                    }
+
+                    if (bitmapClone == null)
+                    {
+                        bitmapClone = (System.Drawing.Bitmap)bitmap.Clone();
+                        SetCurrentProcessingBitmap(bitmapClone);
                     }
                     
                     // Process with HTTP service - returns JSON directly

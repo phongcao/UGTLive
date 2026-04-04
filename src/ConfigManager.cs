@@ -58,7 +58,9 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_MODEL = "generic_llm_ocr_model";
         public const string GENERIC_LLM_OCR_MODE = "generic_llm_ocr_mode";
         public const string GENERIC_LLM_OCR_TARGET_LANGUAGE = "generic_llm_ocr_target_language";
+        public const string GENERIC_LLM_OCR_FOCUS_MODE = "generic_llm_ocr_focus_mode";
         public const string GENERIC_LLM_OCR_STREAMING = "generic_llm_ocr_streaming";
+        public const string GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES = "generic_llm_ocr_detect_image_changes";
         
         // Per-OCR glue settings (for EasyOCR, MangaOCR, docTR, Windows OCR, Google Vision)
         // Format: horizontal_glue_<ocrmethod>, vertical_glue_<ocrmethod>, keep_linefeeds_<ocrmethod>, leave_translation_onscreen_<ocrmethod>
@@ -1089,6 +1091,22 @@ namespace UGTLive
             }
         }
 
+        public string GetGenericLlmOcrFocusMode()
+        {
+            string focusMode = GetValue(GENERIC_LLM_OCR_FOCUS_MODE, "Full Frame").Trim();
+            if (string.IsNullOrWhiteSpace(focusMode))
+            {
+                return "Full Frame";
+            }
+
+            if (string.Equals(focusMode, "Dialogue Only", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Region";
+            }
+
+            return focusMode;
+        }
+
         public bool IsGenericLlmOcrStreamingEnabled()
         {
             string value = GetValue(GENERIC_LLM_OCR_STREAMING, "false");
@@ -1099,6 +1117,12 @@ namespace UGTLive
         {
             _configValues[GENERIC_LLM_OCR_STREAMING] = enabled.ToString().ToLower();
             SaveConfig();
+        }
+
+        public bool IsGenericLlmOcrDetectImageChangesEnabled()
+        {
+            string value = GetValue(GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES, "true");
+            return value.ToLower() == "true";
         }
         
         
