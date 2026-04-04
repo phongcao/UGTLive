@@ -304,7 +304,7 @@ namespace UGTLive
 
         public void ResetHash([CallerMemberName] string caller = "")
         {
-            if (_lastGenericLlmOcrFrameHash != null)
+            if (_lastGenericLlmOcrFrameHash != null && ConfigManager.Instance.GetLogExtraDebugStuff())
             {
                 Log($"[GLLM HASH] reset caller={caller} overlaySession={_overlaySessionId} previousFrameHash={FormatGenericLlmOcrHashPreview(_lastGenericLlmOcrFrameHash)}");
             }
@@ -424,7 +424,10 @@ namespace UGTLive
         {
             if (!ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled())
             {
-                Log("[GLLM HASH] compare detect_changes=false decision=SEND");
+                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    Log("[GLLM HASH] compare detect_changes=false decision=SEND");
+                }
                 return false;
             }
 
@@ -447,18 +450,24 @@ namespace UGTLive
 
                 if (previousHashPreview == "none")
                 {
-                    Log(
-                        $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
-                        $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
-                        $"prev=none current={currentHashPreview} decision=BASELINE_SEND");
+                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                    {
+                        Log(
+                            $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
+                            $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
+                            $"prev=none current={currentHashPreview} decision=BASELINE_SEND");
+                    }
                     return false;
                 }
 
-                Log(
-                    $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
-                    $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
-                    $"prev={previousHashPreview} current={currentHashPreview} diff={hashDifference} " +
-                    $"threshold={GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD} decision={(matchesPreviousFrame ? "SKIP" : "SEND")}");
+                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    Log(
+                        $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
+                        $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
+                        $"prev={previousHashPreview} current={currentHashPreview} diff={hashDifference} " +
+                        $"threshold={GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD} decision={(matchesPreviousFrame ? "SKIP" : "SEND")}");
+                }
 
                 if (matchesPreviousFrame && ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
@@ -469,7 +478,10 @@ namespace UGTLive
             }
             catch (Exception ex)
             {
-                Log($"[GLLM HASH] compare error decision=SEND message={ex.Message}");
+                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    Log($"[GLLM HASH] compare error decision=SEND message={ex.Message}");
+                }
                 return false;
             }
         }
@@ -2588,7 +2600,10 @@ namespace UGTLive
                     // Check for session change (user moved to a new capture area)
                     if (sessionId != _overlaySessionId)
                     {
-                        Log("Streaming: Session changed, aborting stream");
+                        if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                        {
+                            Log("Streaming: Session changed, aborting stream");
+                        }
                         ClearStreamingPreviewOverlays();
                         return false;
                     }
@@ -2728,8 +2743,11 @@ namespace UGTLive
                             if (!string.IsNullOrEmpty(delta))
                             {
                                 llmAccumulated.Append(delta);
-                                string accumulated = llmAccumulated.ToString().Replace("\r", "").Replace("\n", " | ");
-                                Log($"LLM stream: {accumulated}");
+                                if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                                {
+                                    string accumulated = llmAccumulated.ToString().Replace("\r", "").Replace("\n", " | ");
+                                    Log($"LLM stream: {accumulated}");
+                                }
                             }
                         }
                         else if (eventType == "stream_end")
@@ -3109,7 +3127,10 @@ namespace UGTLive
                     if (ocrMethod == "Generic LLM OCR" && ConfigManager.Instance.IsGenericLlmOcrStreamingEnabled())
                     {
                         long currentSessionId = _overlaySessionId;
-                        Log($"[GLLM HASH] streaming_check overlaySession={currentSessionId} bytes={imageBytes.Length} detect_changes={ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled()} focus={ConfigManager.Instance.GetGenericLlmOcrFocusMode()}");
+                        if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                        {
+                            Log($"[GLLM HASH] streaming_check overlaySession={currentSessionId} bytes={imageBytes.Length} detect_changes={ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled()} focus={ConfigManager.Instance.GetGenericLlmOcrFocusMode()}");
+                        }
 
                         if (ShouldSkipGenericLlmOcrStreamingFrame(imageBytes))
                         {
