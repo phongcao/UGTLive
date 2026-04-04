@@ -214,11 +214,11 @@ namespace UGTLive
         }
       
      
-        void OnFinishedThings(bool bResetTranslationStatus, [System.Runtime.CompilerServices.CallerMemberName] string callerName = "", [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        void OnFinishedThings(bool bResetTranslationStatus, bool skipOverlayRefresh = false, [System.Runtime.CompilerServices.CallerMemberName] string callerName = "", [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
         {
             if (ConfigManager.Instance.GetLogExtraDebugStuff())
             {
-                Log($"[SETTLE DEBUG] OnFinishedThings called from {callerName}:{callerLine}, bResetTranslationStatus={bResetTranslationStatus}");
+                Log($"[SETTLE DEBUG] OnFinishedThings called from {callerName}:{callerLine}, bResetTranslationStatus={bResetTranslationStatus}, skipOverlayRefresh={skipOverlayRefresh}");
             }
 
             CompleteOcrTranslateCycle();
@@ -252,13 +252,19 @@ namespace UGTLive
                     textObject.Dispose();
                 }
                 _textObjectsOld.Clear();
-                MonitorWindow.Instance?.ClearOverlays();
-                MainWindow.Instance?.RefreshMainWindowOverlays();
+                if (!skipOverlayRefresh)
+                {
+                    MonitorWindow.Instance?.ClearOverlays();
+                    MainWindow.Instance?.RefreshMainWindowOverlays();
+                }
                 _keepingTranslationVisible = false;
             }
-            
-            MonitorWindow.Instance.RefreshOverlays();
-            MainWindow.Instance.RefreshMainWindowOverlays();
+
+            if (!skipOverlayRefresh)
+            {
+                MonitorWindow.Instance.RefreshOverlays();
+                MainWindow.Instance.RefreshMainWindowOverlays();
+            }
 
             // Hide translation status
             if (bResetTranslationStatus)
@@ -2706,6 +2712,17 @@ namespace UGTLive
                     }
                 }
 
+                // Sync overlay HTML caches so that any future call to
+                // UpdateOverlayWebView/UpdateMainWindowOverlayWebView sees
+                // matching HTML and skips the destructive NavigateToString reload.
+                // Without this, the cleared cache would cause the next unrelated
+                // trigger (audio ready callback, timer, etc.) to destroy the DOM.
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    MonitorWindow.Instance.SyncOverlayHtmlCache();
+                    MainWindow.Instance?.SyncOverlayHtmlCache();
+                });
+
                 return true;
             }
             catch (Exception ex)
@@ -2938,7 +2955,7 @@ namespace UGTLive
                             ClearCurrentProcessingBitmap();
                             MainWindow.Instance.SetOCRCheckIsWanted(true);
                             NotifyOCRCompleted();
-                            OnFinishedThings(true);
+                            OnFinishedThings(true, skipOverlayRefresh: true);
                             return;
                         }
                     }
