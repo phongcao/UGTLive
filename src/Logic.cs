@@ -2527,7 +2527,8 @@ namespace UGTLive
                 double height,
                 string textOrientation,
                 Color? foregroundColor,
-                Color? backgroundColor)
+                Color? backgroundColor,
+                bool refitText)
             {
                 Application.Current.Dispatcher.Invoke(() =>
                 {
@@ -2541,7 +2542,8 @@ namespace UGTLive
                         height,
                         textOrientation,
                         foregroundColor,
-                        backgroundColor);
+                        backgroundColor,
+                        refitText);
                     MainWindow.Instance?.AddStreamingOverlay(
                         overlayId,
                         text,
@@ -2552,7 +2554,8 @@ namespace UGTLive
                         height,
                         textOrientation,
                         foregroundColor,
-                        backgroundColor);
+                        backgroundColor,
+                        refitText);
                 }, DispatcherPriority.Send);
             }
 
@@ -2674,7 +2677,8 @@ namespace UGTLive
                                 height,
                                 textOrientation,
                                 null,
-                                null);
+                                null,
+                                false);
                         }
                         else if (eventType == "text_object")
                         {
@@ -2729,7 +2733,8 @@ namespace UGTLive
                                     height,
                                     textOrientation,
                                     foregroundColor,
-                                    backgroundColor);
+                                        backgroundColor,
+                                        false);
                             }
 
                             // Collect text data for hash comparison (render after stream completes)

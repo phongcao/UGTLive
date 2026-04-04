@@ -870,7 +870,8 @@ namespace UGTLive
                 textObj.Height,
                 textObj.TextOrientation,
                 textObj.TextColor?.Color,
-                textObj.BackgroundColor?.Color);
+                textObj.BackgroundColor?.Color,
+                true);
         }
 
         public void AddStreamingOverlay(
@@ -883,7 +884,8 @@ namespace UGTLive
             double height,
             string textOrientation = "horizontal",
             Color? foregroundColor = null,
-            Color? backgroundColor = null)
+            Color? backgroundColor = null,
+            bool refitText = true)
         {
             if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
                 return;
@@ -901,7 +903,8 @@ namespace UGTLive
                         height,
                         textOrientation,
                         foregroundColor,
-                        backgroundColor),
+                        backgroundColor,
+                        refitText),
                     DispatcherPriority.Send);
                 return;
             }
@@ -954,7 +957,7 @@ namespace UGTLive
 
                 double left = x;
                 double top = y;
-                double initialFontSize = Math.Max(8, Math.Min(128, height * 0.7));
+                double initialFontSize = Math.Max(8, Math.Min(28, height * 0.35));
 
                 int borderRadius = ConfigManager.Instance.GetMonitorTextOverlayBorderRadius();
                 string rgbaString = $"rgba({bgColor.R},{bgColor.G},{bgColor.B},{bgColor.A / 255.0:F3})";
@@ -975,8 +978,9 @@ namespace UGTLive
                 string jsCssClass = System.Text.Json.JsonSerializer.Serialize(cssClass);
                 string jsStyle = System.Text.Json.JsonSerializer.Serialize(styleAttr);
                 string jsText = System.Text.Json.JsonSerializer.Serialize(encodedText);
+                string jsRefitText = refitText.ToString().ToLowerInvariant();
 
-                string script = $"addStreamingOverlay({jsId}, {jsCssClass}, {jsStyle}, {jsText});";
+                string script = $"addStreamingOverlay({jsId}, {jsCssClass}, {jsStyle}, {jsText}, {jsRefitText});";
                 textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
             }
             catch (Exception ex)
@@ -1257,10 +1261,15 @@ namespace UGTLive
             html.AppendLine("  height: 100%;");
             html.AppendLine("}");
             html.AppendLine(".streaming-overlay .text-content {");
+            html.AppendLine("  overflow: hidden;");
+            html.AppendLine("  word-break: break-word;");
+            html.AppendLine("  overflow-wrap: anywhere;");
+            html.AppendLine("  align-items: flex-start;");
             html.AppendLine("  justify-content: flex-start;");
             html.AppendLine("  text-align: left;");
             html.AppendLine("}");
             html.AppendLine(".streaming-overlay.vertical-text .text-content {");
+            html.AppendLine("  overflow: hidden;");
             html.AppendLine("  align-items: flex-start;");
             html.AppendLine("  justify-content: flex-start;");
             html.AppendLine("  text-align: start;");
@@ -1316,6 +1325,9 @@ namespace UGTLive
             html.AppendLine("}");
             html.AppendLine(".streaming-overlay {");
             html.AppendLine("  z-index: 50;");
+            html.AppendLine("  overflow: hidden !important;");
+            html.AppendLine("  align-items: flex-start !important;");
+            html.AppendLine("  justify-content: flex-start !important;");
             html.AppendLine("  pointer-events: none !important;");
             html.AppendLine("  user-select: none !important;");
             html.AppendLine("}");
@@ -1567,7 +1579,7 @@ namespace UGTLive
             html.AppendLine("  }");
             html.AppendLine("}");
             html.AppendLine("");
-            html.AppendLine("function addStreamingOverlay(id, cssClass, styleAttr, encodedText) {");
+            html.AppendLine("function addStreamingOverlay(id, cssClass, styleAttr, encodedText, shouldRefit) {");
             html.AppendLine("  const container = document.getElementById('scroll-container');");
             html.AppendLine("  if (!container) return;");
             html.AppendLine("  const overlayId = 'streaming-overlay-' + id;");
@@ -1587,9 +1599,18 @@ namespace UGTLive
             html.AppendLine("    span.className = 'text-content';");
             html.AppendLine("    div.appendChild(span);");
             html.AppendLine("  }");
-            html.AppendLine("  if (span.innerHTML === encodedText) return;");
-            html.AppendLine("  span.innerHTML = encodedText;");
-            html.AppendLine("  fitStreamingTextToBox(span, div);");
+            html.AppendLine("  const storedSize = parseFloat(div.getAttribute('data-stream-font-size') || '');");
+            html.AppendLine("  const hasStoredSize = Number.isFinite(storedSize) && storedSize > 0;");
+            html.AppendLine("  if (span.innerHTML === encodedText && !shouldRefit && hasStoredSize) return;");
+            html.AppendLine("  if (span.innerHTML !== encodedText) span.innerHTML = encodedText;");
+            html.AppendLine("  if (shouldRefit) {");
+            html.AppendLine("    fitStreamingTextToBox(span, div);");
+            html.AppendLine("  } else if (!hasStoredSize) {");
+            html.AppendLine("    var cssSize = parseFloat(window.getComputedStyle(span).fontSize || '14');");
+            html.AppendLine("    div.setAttribute('data-stream-font-size', String(cssSize));");
+            html.AppendLine("  } else {");
+            html.AppendLine("    span.style.fontSize = storedSize + 'px';");
+            html.AppendLine("  }");
             html.AppendLine("}");
             html.AppendLine("");
             html.AppendLine("function clearAllStreamingOverlays() {");
@@ -1620,8 +1641,8 @@ namespace UGTLive
             html.AppendLine("  }");
             html.AppendLine("  div.id = finalDomId;");
             html.AppendLine("  div.removeAttribute('data-streaming');");
-            html.AppendLine("  div.className = cssClass;");
-            html.AppendLine("  if (!existingDiv) div.setAttribute('style', styleAttr);");
+            html.AppendLine("  if (existingDiv) { div.classList.remove('streaming-overlay'); div.classList.add(...cssClass.split(' ').filter(c => c)); div.style.alignItems = 'flex-start'; }");
+            html.AppendLine("  else { div.className = cssClass; div.setAttribute('style', styleAttr); }");
             html.AppendLine("  applyOverlayAttributes(div, attributes);");
             html.AppendLine("  let span = div.querySelector('.text-content');");
             html.AppendLine("  if (!span) {");
@@ -1629,6 +1650,7 @@ namespace UGTLive
             html.AppendLine("    span.className = 'text-content';");
             html.AppendLine("    div.appendChild(span);");
             html.AppendLine("  }");
+            html.AppendLine("  if (existingDiv) { span.style.alignItems = 'flex-start'; span.style.justifyContent = 'flex-start'; }");
             html.AppendLine("  if (!existingDiv) span.innerHTML = encodedText;");
             html.AppendLine("  let icon = div.querySelector('.audio-icon');");
             html.AppendLine("  if (!showAudioIcon) {");
