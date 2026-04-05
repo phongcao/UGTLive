@@ -9,9 +9,11 @@ import wave
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import tempfile
+
 import uvicorn
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -146,6 +148,64 @@ async def stream_audio_post(req: TTSRequest):
 async def tts_endpoint(req: TTSRequest):
     """Non-streaming TTS endpoint. Returns audio/wav."""
     return await _synthesize_audio(req.text, req.voice_id)
+
+
+@app.post("/clone")
+async def clone_voice(
+    text: str = Form(...),
+    voice_id: Optional[str] = Form(None),
+    reference_audio: UploadFile = File(...),
+):
+    """Synthesize with a cloned voice from reference audio (3-5s WAV/MP3/FLAC)."""
+    global TTS_MODEL
+
+    if TTS_MODEL is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    # Save uploaded audio to a temp file for encode_reference
+    suffix = Path(reference_audio.filename).suffix if reference_audio.filename else ".wav"
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await reference_audio.read())
+            tmp_path = tmp.name
+
+        start_time = time.time()
+        voice_data = TTS_MODEL.encode_reference(tmp_path)
+        audio = TTS_MODEL.infer(text=text, voice=voice_data)
+        elapsed = time.time() - start_time
+
+        text_preview = text[:60] + "..." if len(text) > 60 else text
+        print(f"Clone TTS generated in {elapsed:.2f}s, text='{text_preview}'")
+
+        pcm_data = float32_to_pcm16(audio)
+        sample_rate = 24000
+
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+        buf.seek(0)
+
+        return Response(
+            content=buf.read(),
+            media_type="audio/wav",
+            headers={"Content-Disposition": "attachment; filename=tts_clone_output.wav"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in voice cloning TTS: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 async def _synthesize_audio(text: str, voice_id: Optional[str] = None):

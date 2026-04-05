@@ -159,9 +159,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [Step 2/4] Installing VieNeu-TTS SDK...
-echo [Step 2/4] Installing vieneu... >> "%LOG_FILE%"
-python -m pip install vieneu --extra-index-url https://pnnbao97.github.io/llama-cpp-python-v0.3.16/cpu/ >> "%LOG_FILE%" 2>&1
+echo [Step 2/4] Installing VieNeu-TTS v2 SDK...
+echo [Step 2/4] Installing vieneu (upgrade to latest)... >> "%LOG_FILE%"
+python -m pip install --upgrade vieneu --extra-index-url https://pnnbao97.github.io/llama-cpp-python-v0.3.16/cpu/ >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
     echo ERROR: Failed to install vieneu!
     echo ERROR: Failed to install vieneu >> "%LOG_FILE%"
