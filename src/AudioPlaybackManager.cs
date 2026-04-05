@@ -296,6 +296,7 @@ namespace UGTLive
             }
 
             Qwen3TtsService.Instance.StopActivePlayback();
+            VieNeuTtsService.Instance.StopActivePlayback();
             
             // Update current playing ID and transition state
             // This avoids race condition when switching between playing audio files
@@ -421,11 +422,16 @@ namespace UGTLive
             var sortedObjects = SortTextObjectsByPlayOrder(textObjects, playOrder);
             bool useLocalQwenStreaming = ShouldUseLocalQwenStreamingForPlayAll(useSourceAudio, out string streamingVoice);
             
+            // Determine which local TTS service to use for streaming
+            string streamingServiceName = useSourceAudio
+                ? ConfigManager.Instance.GetTtsSourceService()
+                : ConfigManager.Instance.GetTtsTargetService();
+            
             List<TextObject> objectsToPlay;
             if (useLocalQwenStreaming)
             {
                 objectsToPlay = sortedObjects.Where(obj => TryGetStreamingTextForObject(obj, useSourceAudio, out _)).ToList();
-                Console.WriteLine($"PlayAllAudio: Using local Qwen3-TTS live streaming for {objectsToPlay.Count} text objects");
+                Console.WriteLine($"PlayAllAudio: Using local {streamingServiceName} live streaming for {objectsToPlay.Count} text objects");
             }
             else
             {
@@ -497,7 +503,15 @@ namespace UGTLive
                                 Console.WriteLine($"PlayAllAudio: Streaming audio for text object {textObj.ID}");
                             }
 
-                            bool success = await Qwen3TtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
+                            bool success;
+                            if (streamingServiceName == "VieNeu-TTS")
+                            {
+                                success = await VieNeuTtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
+                            }
+                            else
+                            {
+                                success = await Qwen3TtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
+                            }
 
                             if (ConfigManager.Instance.GetLogExtraDebugStuff())
                             {
@@ -614,17 +628,26 @@ namespace UGTLive
                 ? ConfigManager.Instance.GetTtsSourceVoice()
                 : ConfigManager.Instance.GetTtsTargetVoice();
 
-            if (service != "Qwen3-TTS" || !TtsServiceFactory.IsLocalService(service))
+            if (!TtsServiceFactory.IsLocalService(service))
             {
                 return false;
             }
 
-            if (!Qwen3TtsService.AvailableVoices.ContainsValue(voice))
+            if (service == "Qwen3-TTS")
             {
-                voice = ConfigManager.Instance.GetQwen3TtsVoice();
+                if (!Qwen3TtsService.AvailableVoices.ContainsValue(voice))
+                {
+                    voice = ConfigManager.Instance.GetQwen3TtsVoice();
+                }
+                return true;
             }
 
-            return true;
+            if (service == "VieNeu-TTS")
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private bool TryGetStreamingTextForObject(TextObject textObj, bool useSourceAudio, out string textToSpeak)

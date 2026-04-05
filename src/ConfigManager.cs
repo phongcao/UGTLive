@@ -186,6 +186,11 @@ namespace UGTLive
         public const string QWEN3_TTS_EXTERNAL_API_KEY = "qwen3_tts_external_api_key";
         public const string QWEN3_TTS_EXTERNAL_MODEL = "qwen3_tts_external_model";
         
+        // VieNeu-TTS configuration keys
+        public const string VIENEU_TTS_URL = "vieneu_tts_url";
+        public const string VIENEU_TTS_PORT = "vieneu_tts_port";
+        public const string VIENEU_TTS_VOICE = "vieneu_tts_voice";
+        
         // TTS Preload configuration keys
         public const string TTS_SOURCE_SERVICE = "tts_source_service";
         public const string TTS_SOURCE_VOICE = "tts_source_voice";
@@ -2022,6 +2027,30 @@ Here is the input JSON:";
             }
         }
         
+        // VieNeu-TTS methods
+
+        public string GetVieNeuTtsUrl()
+        {
+            return GetValue(VIENEU_TTS_URL, "http://127.0.0.1");
+        }
+
+        public string GetVieNeuTtsPort()
+        {
+            return GetValue(VIENEU_TTS_PORT, "8001");
+        }
+
+        public string GetVieNeuTtsVoice()
+        {
+            return GetValue(VIENEU_TTS_VOICE, "Xuân Vĩnh (Nam - Miền Nam)");
+        }
+
+        public void SetVieNeuTtsVoice(string voice)
+        {
+            _configValues[VIENEU_TTS_VOICE] = voice ?? "";
+            SaveConfig();
+            Console.WriteLine($"VieNeu-TTS voice set to: {voice}");
+        }
+        
         private void migratePageReadingTtsDefaults()
         {
             // If the user never explicitly chose a Page Reading TTS service, the config file
@@ -2169,6 +2198,7 @@ Here is the input JSON:";
             {
                 "Qwen3-TTS" => GetQwen3TtsVoice(),
                 "Google Cloud TTS" => GetGoogleTtsVoice(),
+                "VieNeu-TTS" => GetVieNeuTtsVoice(),
                 _ => GetElevenLabsVoice()
             };
         }

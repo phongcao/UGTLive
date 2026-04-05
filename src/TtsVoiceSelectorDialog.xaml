@@ -32,6 +32,7 @@
             <ComboBoxItem Content="ElevenLabs"/>
             <ComboBoxItem Content="Google Cloud TTS"/>
             <ComboBoxItem Content="Qwen3-TTS"/>
+            <ComboBoxItem Content="VieNeu-TTS"/>
         </ComboBox>
         
         <!-- Voice Selection -->
