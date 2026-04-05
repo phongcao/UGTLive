@@ -2,7 +2,7 @@ description|Vietnamese Text-to-Speech with instant voice cloning using VieNeu-TT
 github_url|https://github.com/pnnbao97/VieNeu-TTS|
 service_author|Pham Nguyen Ngoc Bao|
 service_name|VieNeuTTS|
-port|8001|
+port|5007|
 server_url|http://127.0.0.1|
 venv_name|ugt_vieneutts|
 local_only|true|

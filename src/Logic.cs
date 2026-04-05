@@ -57,8 +57,8 @@ namespace UGTLive
         // Session ID to track validity of OCR requests
         private long _overlaySessionId = 0;
         private byte[]? _lastGenericLlmOcrFrameHash = null;
-        private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 3;
-        private const string GENERIC_LLM_OCR_FOCUS_MODE_REGION = "Region";
+        private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 5;
+        private const string GENERIC_LLM_OCR_FOCUS_MODE_REGION = "Full Frame";
 
         // Track the current capture position
         private int _currentCaptureX;

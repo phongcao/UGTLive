@@ -123,12 +123,26 @@ namespace UGTLive
             return false;
         }
         
+        private static readonly string[] _priorityServices = { "Generic LLM OCR", "VieNeuTTS", "Qwen3TTS" };
+
         /// <summary>
-        /// Gets all discovered services
+        /// Gets all discovered services, with priority services listed first
         /// </summary>
         public List<PythonService> GetAllServices()
         {
-            return _services.Values.ToList();
+            var all = _services.Values.ToList();
+            var priority = new List<PythonService>();
+            var rest = new List<PythonService>();
+
+            foreach (var name in _priorityServices)
+            {
+                var match = all.FirstOrDefault(s => s.ServiceName == name);
+                if (match != null) priority.Add(match);
+            }
+
+            rest = all.Where(s => !_priorityServices.Contains(s.ServiceName)).ToList();
+            priority.AddRange(rest);
+            return priority;
         }
         
         /// <summary>
