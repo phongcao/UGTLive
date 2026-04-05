@@ -2036,7 +2036,7 @@ Here is the input JSON:";
 
         public string GetVieNeuTtsPort()
         {
-            return GetValue(VIENEU_TTS_PORT, "8001");
+            return GetValue(VIENEU_TTS_PORT, "5007");
         }
 
         public string GetVieNeuTtsVoice()
