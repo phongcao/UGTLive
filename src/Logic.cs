@@ -57,8 +57,7 @@ namespace UGTLive
         // Session ID to track validity of OCR requests
         private long _overlaySessionId = 0;
         private byte[]? _lastGenericLlmOcrFrameHash = null;
-        private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 5;
-        private const string GENERIC_LLM_OCR_FOCUS_MODE_REGION = "Full Frame";
+        private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 1;
 
         // Track the current capture position
         private int _currentCaptureX;
@@ -323,24 +322,7 @@ namespace UGTLive
             int width = sourceBitmap.Width;
             int height = sourceBitmap.Height;
 
-            if (width <= 1 || height <= 1)
-            {
-                return new System.Drawing.Rectangle(0, 0, Math.Max(1, width), Math.Max(1, height));
-            }
-
-            string focusMode = ConfigManager.Instance.GetGenericLlmOcrFocusMode();
-            if (!string.Equals(focusMode, GENERIC_LLM_OCR_FOCUS_MODE_REGION, StringComparison.OrdinalIgnoreCase))
-            {
-                return new System.Drawing.Rectangle(0, 0, width, height);
-            }
-
-            int left = Math.Max(0, (int)Math.Round(width * 0.05));
-            int right = Math.Min(width, width - left);
-            int top = Math.Max(0, (int)Math.Round(height * 0.60));
-            int croppedWidth = Math.Max(1, right - left);
-            int croppedHeight = Math.Max(1, height - top);
-
-            return new System.Drawing.Rectangle(left, top, croppedWidth, croppedHeight);
+            return new System.Drawing.Rectangle(0, 0, Math.Max(1, width), Math.Max(1, height));
         }
 
         private byte[] ComputeGenericLlmOcrFrameHash(
@@ -438,8 +420,6 @@ namespace UGTLive
                 bool matchesPreviousFrame = _lastGenericLlmOcrFrameHash != null;
                 string previousHashPreview = FormatGenericLlmOcrHashPreview(_lastGenericLlmOcrFrameHash);
                 string currentHashPreview = FormatGenericLlmOcrHashPreview(frameHash);
-                string focusMode = ConfigManager.Instance.GetGenericLlmOcrFocusMode();
-
                 if (_lastGenericLlmOcrFrameHash != null)
                 {
                     hashDifference = ComputeHammingDistance(frameHash, _lastGenericLlmOcrFrameHash);
@@ -453,7 +433,7 @@ namespace UGTLive
                     if (ConfigManager.Instance.GetLogExtraDebugStuff())
                     {
                         Log(
-                            $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
+                            $"[GLLM HASH] compare source={sourceSize.Width}x{sourceSize.Height} " +
                             $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
                             $"prev=none current={currentHashPreview} decision=BASELINE_SEND");
                     }
@@ -463,7 +443,7 @@ namespace UGTLive
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
                     Log(
-                        $"[GLLM HASH] compare focus={focusMode} source={sourceSize.Width}x{sourceSize.Height} " +
+                        $"[GLLM HASH] compare source={sourceSize.Width}x{sourceSize.Height} " +
                         $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
                         $"prev={previousHashPreview} current={currentHashPreview} diff={hashDifference} " +
                         $"threshold={GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD} decision={(matchesPreviousFrame ? "SKIP" : "SEND")}");
@@ -471,7 +451,7 @@ namespace UGTLive
 
                 if (matchesPreviousFrame && ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
-                    Log($"Streaming: Skipping Generic LLM OCR frame with image-hash difference {hashDifference} using focus mode '{ConfigManager.Instance.GetGenericLlmOcrFocusMode()}'");
+                    Log($"Streaming: Skipping Generic LLM OCR frame with image-hash difference {hashDifference}");
                 }
 
                 return matchesPreviousFrame;
@@ -3134,7 +3114,7 @@ namespace UGTLive
                         long currentSessionId = _overlaySessionId;
                         if (ConfigManager.Instance.GetLogExtraDebugStuff())
                         {
-                            Log($"[GLLM HASH] streaming_check overlaySession={currentSessionId} bytes={imageBytes.Length} detect_changes={ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled()} focus={ConfigManager.Instance.GetGenericLlmOcrFocusMode()}");
+                            Log($"[GLLM HASH] streaming_check overlaySession={currentSessionId} bytes={imageBytes.Length} detect_changes={ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled()}");
                         }
 
                         if (ShouldSkipGenericLlmOcrStreamingFrame(imageBytes))

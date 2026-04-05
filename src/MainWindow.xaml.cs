@@ -3661,6 +3661,11 @@ namespace UGTLive
             Color? backgroundColor = null,
             bool refitText = true)
         {
+            if (_currentOverlayMode == OverlayMode.Hide)
+            {
+                return;
+            }
+
             if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
             {
                 return;
@@ -3824,6 +3829,11 @@ namespace UGTLive
 
         public void CommitStreamingOverlay(string streamId, TextObject textObj)
         {
+            if (_currentOverlayMode == OverlayMode.Hide)
+            {
+                return;
+            }
+
             if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null || textObj == null)
             {
                 return;
@@ -4112,9 +4122,12 @@ namespace UGTLive
             html.AppendLine(".audio-icon:not(.loading) {");
             html.AppendLine("  filter: grayscale(0.7) sepia(0.3) hue-rotate(10deg) saturate(0.6) brightness(1.1);");
             html.AppendLine("}");
-            html.AppendLine(".text-overlay.playing {");
-            html.AppendLine("  animation: playingPulse 1.2s ease-in-out infinite;");
-            html.AppendLine("}");
+            if (ConfigManager.Instance.IsTtsPlayingGlowEnabled())
+            {
+                html.AppendLine(".text-overlay.playing {");
+                html.AppendLine("  animation: playingPulse 1.2s ease-in-out infinite;");
+                html.AppendLine("}");
+            }
             html.AppendLine(".streaming-overlay {");
             html.AppendLine("  z-index: 50;");
             html.AppendLine("  overflow: hidden !important;");
@@ -4123,10 +4136,13 @@ namespace UGTLive
             html.AppendLine("  pointer-events: none !important;");
             html.AppendLine("  user-select: none !important;");
             html.AppendLine("}");
-            html.AppendLine("@keyframes playingPulse {");
-            html.AppendLine("  0%, 100% { filter: drop-shadow(0 0 28px rgba(120, 220, 255, 0.9)) drop-shadow(0 0 12px rgba(100, 200, 255, 0.7)); }");
-            html.AppendLine("  50% { filter: drop-shadow(0 0 50px rgba(140, 230, 255, 1.0)) drop-shadow(0 0 25px rgba(120, 220, 255, 0.9)); }");
-            html.AppendLine("}");
+            if (ConfigManager.Instance.IsTtsPlayingGlowEnabled())
+            {
+                html.AppendLine("@keyframes playingPulse {");
+                html.AppendLine("  0%, 100% { filter: drop-shadow(0 0 28px rgba(120, 220, 255, 0.9)) drop-shadow(0 0 12px rgba(100, 200, 255, 0.7)); }");
+                html.AppendLine("  50% { filter: drop-shadow(0 0 50px rgba(140, 230, 255, 1.0)) drop-shadow(0 0 25px rgba(120, 220, 255, 0.9)); }");
+                html.AppendLine("}");
+            }
             html.AppendLine("</style>");
             html.AppendLine("<script>");
             html.AppendLine("function fitTextToBox(element, container) {");

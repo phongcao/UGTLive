@@ -59,7 +59,6 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_MODE = "generic_llm_ocr_mode";
         public const string GENERIC_LLM_OCR_TARGET_LANGUAGE = "generic_llm_ocr_target_language";
         public const string GENERIC_LLM_OCR_IGNORE_MENU_TEXT = "generic_llm_ocr_ignore_menu_text";
-        public const string GENERIC_LLM_OCR_FOCUS_MODE = "generic_llm_ocr_focus_mode";
         public const string GENERIC_LLM_OCR_STREAMING = "generic_llm_ocr_streaming";
         public const string GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES = "generic_llm_ocr_detect_image_changes";
         
@@ -209,6 +208,7 @@ namespace UGTLive
         public const string TTS_MAX_CONCURRENT_DOWNLOADS = "tts_max_concurrent_downloads";
         public const string TTS_ALWAYS_GENERATE_NEW_AUDIO = "tts_always_generate_new_audio";
         public const string TTS_MIN_CHARS_FOR_TTS = "tts_min_chars_for_tts";
+        public const string TTS_PLAYING_GLOW_ENABLED = "tts_playing_glow_enabled";
 
         // UI Icon Constants
         public const string ICON_SPEAKER_READY = "🔉";
@@ -1115,22 +1115,6 @@ namespace UGTLive
             SaveConfig();
         }
 
-        public string GetGenericLlmOcrFocusMode()
-        {
-            string focusMode = GetValue(GENERIC_LLM_OCR_FOCUS_MODE, "Full Frame").Trim();
-            if (string.IsNullOrWhiteSpace(focusMode))
-            {
-                return "Full Frame";
-            }
-
-            if (string.Equals(focusMode, "Dialogue Only", StringComparison.OrdinalIgnoreCase))
-            {
-                return "Region";
-            }
-
-            return focusMode;
-        }
-
         public bool IsGenericLlmOcrStreamingEnabled()
         {
             string value = GetValue(GENERIC_LLM_OCR_STREAMING, "false");
@@ -1863,6 +1847,12 @@ Here is the input JSON:";
             _configValues[TTS_ENABLED] = enabled.ToString().ToLower();
             SaveConfig();
             Console.WriteLine($"TTS enabled: {enabled}");
+        }
+
+        public bool IsTtsPlayingGlowEnabled()
+        {
+            string value = GetValue(TTS_PLAYING_GLOW_ENABLED, "true");
+            return value.ToLower() == "true";
         }
         
         // Get/Set TTS service
