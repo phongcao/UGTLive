@@ -75,10 +75,15 @@ MODE_OCR_ONLY = "OCR Only"
 MODE_OCR_TRANSLATE = "OCR + Translate"
 
 PROMPT_IGNORE_COMMON_MENU_TEXT = (
-    "Ignore routine in-game menu and UI text that is generic or repeatedly present across frames, "
-    "such as Save, Load, Settings, Back, Exit, etc. "
-    "Focus on character dialogue, subtitles, narration, quest text, cutscene text, "
-    "and choice prompts that matter to the player. "
+    "Ignore routine in-game menu labels, navigation UI, and HUD text that is generic or repeatedly present across frames. "
+    "This includes single-word or short menu entries such as: "
+    "Save, Load, Settings, Options, Back, Exit, Quit, Start, Continue, New Game, "
+    "Talk, Action, Items, Status, Equipment, Skills, Magic, System, Map, Party, Formation, "
+    "Inventory, Shop, Inn, Rest, Cancel, Confirm, Yes, No, OK, Close, Return, Resume, Help, "
+    "as well as their equivalents in any language (e.g. 談話, 動作, 物品, 狀態, 系統, セーブ, ロード, アイテム, etc.). "
+    "Also ignore standalone numeric indicators such as HP/MP bars, gold counters, level numbers, and stat labels. "
+    "Focus on character dialogue, subtitles, narration, quest text, story text, cutscene text, "
+    "and choice/decision prompts whose specific wording matters to the player. "
     f"If the image only contains ignorable menu or UI text, output EXACTLY {NO_TEXT_SENTINEL} and nothing else."
 )
 
