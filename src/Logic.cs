@@ -336,8 +336,8 @@ namespace UGTLive
             comparisonRect = GetGenericLlmOcrComparisonCropRect(sourceBitmap);
             using var croppedBitmap = sourceBitmap.Clone(comparisonRect, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
 
-            const int targetWidth = 16;
-            const int targetHeight = 16;
+            const int targetWidth = 128;
+            const int targetHeight = 128;
 
             using var downscaledBitmap = new System.Drawing.Bitmap(targetWidth, targetHeight, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
             using (var graphics = System.Drawing.Graphics.FromImage(downscaledBitmap))
