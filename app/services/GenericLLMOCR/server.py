@@ -183,7 +183,7 @@ LANGUAGE_NAME_MAP = {
 TRANSLATION_PATTERN = re.compile(
     r"^\s*(?:"
     r"BBOX:\s*\[(?P<bbox_first>[^\]]+)\]\s*\|\s*"
-    r"TEXT:\s*(?P<text_after_bbox>.*?)(?:\s*\|\s*(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_after_bbox>.*?))?"
+    r"(?:TEXT:\s*)?(?P<text_after_bbox>.*?)(?:\s*\|\s*(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_after_bbox>.*?))?"
     r"|"
     r"TEXT:\s*(?P<text_before_bbox>.*?)\s*\|\s*"
     r"(?:(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_before_bbox>.*?)\s*\|\s*)?"
