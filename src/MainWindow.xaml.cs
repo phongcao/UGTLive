@@ -129,6 +129,9 @@ namespace UGTLive
         private string outputPath = DEFAULT_OUTPUT_PATH;
         private WindowInteropHelper helper;
         private System.Drawing.Rectangle captureRect;
+
+        // Separate top-level overlay window (excluded from screen capture via WDA_EXCLUDEFROMCAPTURE)
+        private OverlayWindow? _overlayWindow;
         
         // Translation status timer and tracking
         private DispatcherTimer? _translationStatusTimer;
@@ -1260,78 +1263,61 @@ namespace UGTLive
             previousCaptureX = captureRect.Left;
             previousCaptureY = captureRect.Top;
 
-            // Use DwmGetWindowAttribute to get actual visible window bounds (excludes shadows)
-            // WPF's layout already accounts for text scaling, so we only need DPI conversion
-            if (textOverlayWebView != null && textOverlayWebView.IsLoaded && textOverlayWebView.ActualWidth > 0)
+            // The capture area matches the old OverlayContent margin: Left=15, Top=50, Right=15, Bottom=15 (in DIPs).
+            // These are the same values that were in MainWindow.xaml for the OverlayContent grid.
+            const double OVERLAY_MARGIN_LEFT = 15.0;
+            const double OVERLAY_MARGIN_TOP = 50.0;
+            const double OVERLAY_MARGIN_RIGHT = 15.0;
+            const double OVERLAY_MARGIN_BOTTOM = 15.0;
+
+            try
             {
-                try
+                // Get actual visible window bounds using DWM API (excludes extended frame/shadows)
+                RECT windowRect;
+                int result = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out windowRect, 
+                    System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
+                
+                if (result != 0)
                 {
-                    // Get actual visible window bounds using DWM API (excludes extended frame/shadows)
-                    // NOTE: DWM returns bounds in ACTUAL physical screen pixels, even when DPI is virtualized
-                    RECT windowRect;
-                    int result = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out windowRect, 
-                        System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
-                    
-                    if (result != 0)
-                    {
-                        // Fallback to GetWindowRect if DWM fails
-                        GetWindowRect(hwnd, out windowRect);
-                    }
-                    
-                    // Get actual monitor DPI (what the screen is really at)
-                    double actualDpiScale = GetActualDpiScale();
-                    // Get virtualized DPI (what WPF thinks we're at)
-                    double virtualizedDpiScale = GetVirtualizedDpiScale();
-                    
-                    // WPF dimensions are in DIPs. When multiplied by virtualizedDpiScale,
-                    // we get "virtualized physical pixels". But the window rect from DWM is
-                    // in actual physical pixels. We need to correct for this.
-                    double dpiCorrectionFactor = actualDpiScale / virtualizedDpiScale;
-                    
-                    // Get WebView's position within the window (in WPF DIPs)
-                    // WPF layout already accounts for text scaling in the DIP values
-                    var transform = textOverlayWebView.TransformToAncestor(this);
-                    System.Windows.Point webViewInWindow = transform.Transform(new System.Windows.Point(0, 0));
-                    
-                    // Convert WPF offset to actual physical pixels
-                    // DIPs * virtualizedDpiScale = virtualized physical pixels
-                    // virtualized physical pixels * correctionFactor = actual physical pixels
-                    int offsetX = (int)(webViewInWindow.X * virtualizedDpiScale * dpiCorrectionFactor);
-                    int offsetY = (int)(webViewInWindow.Y * virtualizedDpiScale * dpiCorrectionFactor);
-                    
-                    // Calculate capture size in actual physical pixels
-                    int captureWidth = (int)(textOverlayWebView.ActualWidth * virtualizedDpiScale * dpiCorrectionFactor);
-                    int captureHeight = (int)(textOverlayWebView.ActualHeight * virtualizedDpiScale * dpiCorrectionFactor);
-                    
-                    // Calculate capture position: window physical position + WebView offset
-                    int captureLeft = windowRect.Left + offsetX;
-                    int captureTop = windowRect.Top + offsetY;
-                    
-                    // Debug: log once when snapshot is taken
-                    if (_logCaptureRectOnce && ConfigManager.Instance.GetLogExtraDebugStuff())
-                    {
-                        _logCaptureRectOnce = false;
-                        double textScale = GetWindowsTextScaleFactor();
-                        Console.WriteLine($"[DEBUG] Window rect: L={windowRect.Left}, T={windowRect.Top}, W={windowRect.Width}, H={windowRect.Height}");
-                        Console.WriteLine($"[DEBUG] WebView in window (DIPs): X={webViewInWindow.X:F1}, Y={webViewInWindow.Y:F1}");
-                        Console.WriteLine($"[DEBUG] WebView actual size (DIPs): {textOverlayWebView.ActualWidth:F0}x{textOverlayWebView.ActualHeight:F0}");
-                        Console.WriteLine($"[DEBUG] Actual DPI: {actualDpiScale}, Virtualized DPI: {virtualizedDpiScale}, Correction: {dpiCorrectionFactor:F3}");
-                        Console.WriteLine($"[DEBUG] Text scale: {textScale}");
-                        Console.WriteLine($"[DEBUG] Calculated offset: X={offsetX}, Y={offsetY}");
-                        Console.WriteLine($"[DEBUG] Capture rect: L={captureLeft}, T={captureTop}, {captureWidth}x{captureHeight}");
-                    }
-                    
+                    GetWindowRect(hwnd, out windowRect);
+                }
+                
+                double actualDpiScale = GetActualDpiScale();
+                double virtualizedDpiScale = GetVirtualizedDpiScale();
+                double dpiCorrectionFactor = actualDpiScale / virtualizedDpiScale;
+                
+                // Convert WPF DIP margins to actual physical pixels
+                int offsetX = (int)(OVERLAY_MARGIN_LEFT * virtualizedDpiScale * dpiCorrectionFactor);
+                int offsetY = (int)(OVERLAY_MARGIN_TOP * virtualizedDpiScale * dpiCorrectionFactor);
+                int marginRight = (int)(OVERLAY_MARGIN_RIGHT * virtualizedDpiScale * dpiCorrectionFactor);
+                int marginBottom = (int)(OVERLAY_MARGIN_BOTTOM * virtualizedDpiScale * dpiCorrectionFactor);
+                
+                int captureWidth = windowRect.Width - offsetX - marginRight;
+                int captureHeight = windowRect.Height - offsetY - marginBottom;
+                
+                int captureLeft = windowRect.Left + offsetX;
+                int captureTop = windowRect.Top + offsetY;
+                
+                if (_logCaptureRectOnce && ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    _logCaptureRectOnce = false;
+                    double textScale = GetWindowsTextScaleFactor();
+                    Console.WriteLine($"[DEBUG] Window rect: L={windowRect.Left}, T={windowRect.Top}, W={windowRect.Width}, H={windowRect.Height}");
+                    Console.WriteLine($"[DEBUG] Overlay margins (DIPs): L={OVERLAY_MARGIN_LEFT}, T={OVERLAY_MARGIN_TOP}, R={OVERLAY_MARGIN_RIGHT}, B={OVERLAY_MARGIN_BOTTOM}");
+                    Console.WriteLine($"[DEBUG] Actual DPI: {actualDpiScale}, Virtualized DPI: {virtualizedDpiScale}, Correction: {dpiCorrectionFactor:F3}");
+                    Console.WriteLine($"[DEBUG] Text scale: {textScale}");
+                    Console.WriteLine($"[DEBUG] Calculated offset: X={offsetX}, Y={offsetY}");
+                    Console.WriteLine($"[DEBUG] Capture rect: L={captureLeft}, T={captureTop}, {captureWidth}x{captureHeight}");
+                }
+
+                if (captureWidth > 0 && captureHeight > 0)
+                {
                     captureRect = new System.Drawing.Rectangle(captureLeft, captureTop, captureWidth, captureHeight);
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[UpdateCaptureRect] Coordinate calculation failed: {ex.Message}");
-                    UpdateCaptureRectFallback(hwnd);
-                }
             }
-            else
+            catch (Exception ex)
             {
-                // OverlayContent not ready yet, use fallback
+                Console.WriteLine($"[UpdateCaptureRect] Coordinate calculation failed: {ex.Message}");
                 UpdateCaptureRectFallback(hwnd);
             }
                 
@@ -2083,7 +2069,7 @@ namespace UGTLive
         {
             try
             {
-                if (textOverlayWebView?.CoreWebView2 != null)
+                if (_overlayWindow?.IsWebViewInitialized == true)
                 {
                     // Update all icons and overlays - set playing one to stop icon with playing class
                     string script = $@"
@@ -2108,7 +2094,7 @@ namespace UGTLive
                             }});
                         }})();
                     ";
-                    textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+                    _overlayWindow.ExecuteScript(script);
                 }
             }
             catch (Exception ex)
@@ -2128,7 +2114,7 @@ namespace UGTLive
                     return;
                 }
 
-                if (textOverlayWebView?.CoreWebView2 != null)
+                if (_overlayWindow?.IsWebViewInitialized == true)
                 {
                      var textObjects = Logic.Instance?.GetTextObjects();
                      var textObj = textObjects?.FirstOrDefault(t => t.ID == textObjectId);
@@ -2171,7 +2157,7 @@ namespace UGTLive
                      string escapedAudioPath = audioPath.Replace("\\", "\\\\").Replace("'", "\\'");
                      string script = $"setAudioState('{textObjectId}', {audioIsReady.ToString().ToLower()}, {isSourceForClick.ToString().ToLower()}, '{escapedAudioPath}', {isSourceUpdate.ToString().ToLower()}, '{iconReady}', '{iconNotReady}');";
                      
-                     textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+                     _overlayWindow.ExecuteScript(script);
                 }
             }
             catch (Exception ex)
@@ -2281,6 +2267,8 @@ namespace UGTLive
                 string.Equals(ocrMethod, "Generic LLM OCR", StringComparison.OrdinalIgnoreCase) &&
                 ConfigManager.Instance.IsGenericLlmOcrStreamingEnabled() &&
                 ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled();
+            // Only hide the overlay when we actually need a clean capture for OCR.
+            // TryCopyCaptureRectToBitmap will skip the hide if WDA_EXCLUDEFROMCAPTURE is active.
             bool suppressMainWindowOverlay = needsCleanCaptureForOcr && !isGenericLlmStreamingHashCheck;
 
             if (needsCleanCaptureForOcr && isGenericLlmStreamingHashCheck && ConfigManager.Instance.GetLogExtraDebugStuff())
@@ -2385,20 +2373,16 @@ namespace UGTLive
 
         private bool TryCopyCaptureRectToBitmap(Bitmap bitmap, bool suppressMainWindowOverlay, string errorContext)
         {
-            Visibility originalOverlayVisibility = Visibility.Hidden;
-            bool overlayWasSuppressed = false;
-
+            // The overlay is now a separate top-level window.
+            // Only hide it when the caller actually needs a clean capture (for OCR).
+            // The suppressMainWindowOverlay flag indicates this need.
+            bool shouldHideOverlay = suppressMainWindowOverlay && _overlayWindow != null
+                && !(_overlayWindow.IsCaptureExclusionActive);
             try
             {
-                if (suppressMainWindowOverlay && OverlayContent != null)
+                if (shouldHideOverlay)
                 {
-                    originalOverlayVisibility = OverlayContent.Visibility;
-                    if (originalOverlayVisibility == Visibility.Visible)
-                    {
-                        OverlayContent.Visibility = Visibility.Hidden;
-                        FlushWindowForCapture();
-                        overlayWasSuppressed = true;
-                    }
+                    _overlayWindow!.HideForCapture();
                 }
 
                 using (Graphics g = Graphics.FromImage(bitmap))
@@ -2426,10 +2410,9 @@ namespace UGTLive
             }
             finally
             {
-                if (overlayWasSuppressed && OverlayContent != null)
+                if (shouldHideOverlay)
                 {
-                    OverlayContent.Visibility = originalOverlayVisibility;
-                    FlushWindowForCapture();
+                    _overlayWindow!.ShowAfterCapture();
                 }
             }
         }
@@ -2629,14 +2612,14 @@ namespace UGTLive
                 return await operation.Task.Unwrap();
             }
 
-            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            if (!_overlayWebViewInitialized || _overlayWindow?.IsWebViewInitialized != true)
             {
                 return new Dictionary<string, double>();
             }
 
             try
             {
-                string rawResult = await textOverlayWebView.CoreWebView2.ExecuteScriptAsync("getStreamingOverlayFontSizes();");
+                string rawResult = await _overlayWindow.ExecuteScriptWithResultAsync("getStreamingOverlayFontSizes();");
                 string? json = System.Text.Json.JsonSerializer.Deserialize<string>(rawResult);
                 if (string.IsNullOrWhiteSpace(json))
                 {
@@ -3358,158 +3341,79 @@ namespace UGTLive
         {
             try
             {
-                var environment = await WebViewEnvironmentManager.GetEnvironmentAsync();
-                
-                // CRITICAL: Set WebView2 background to transparent BEFORE initializing
-                textOverlayWebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
-                
-                await textOverlayWebView.EnsureCoreWebView2Async(environment);
-                
-                if (textOverlayWebView.CoreWebView2 != null)
+                // Create the overlay as a separate top-level window so that
+                // WDA_EXCLUDEFROMCAPTURE works (it only applies to top-level HWNDs).
+                _overlayWindow = new OverlayWindow();
+                _overlayWindow.Owner = null; // Truly independent top-level window
+                _overlayWindow.Show();
+
+                // Position the overlay to cover the capture area
+                SyncOverlayWindowPosition();
+
+                // Set initial click-through state
+                bool mousePassthrough = ConfigManager.Instance.GetMainWindowMousePassthrough();
+                _overlayWindow.SetClickThrough(mousePassthrough);
+
+                await _overlayWindow.InitializeWebViewAsync(
+                    MainWindowOverlayWebView_WebMessageReceived,
+                    MainWindowOverlayWebView_ContextMenuRequested);
+
+                if (_overlayWindow.IsWebViewInitialized)
                 {
-                    
-                    textOverlayWebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-                    
-                    textOverlayWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
-                    textOverlayWebView.CoreWebView2.Settings.IsZoomControlEnabled = false;
-                    textOverlayWebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
-                    
-                    // Set interaction state based on current passthrough setting
-                    bool mousePassthrough = ConfigManager.Instance.GetMainWindowMousePassthrough();
-                    bool canInteract = !mousePassthrough;
-                    textOverlayWebView.IsHitTestVisible = canInteract;
-                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                    {
-                        Console.WriteLine($"MainWindow text interaction initialized: {(canInteract ? "enabled" : "disabled (click-through)")}");
-                    }
-                    
-                    // Add event handlers for context menu
-                    textOverlayWebView.CoreWebView2.WebMessageReceived += MainWindowOverlayWebView_WebMessageReceived;
-                    textOverlayWebView.CoreWebView2.ContextMenuRequested += MainWindowOverlayWebView_ContextMenuRequested;
-                    
                     _overlayWebViewInitialized = true;
-                    
+
                     // Initial empty render
                     UpdateMainWindowOverlayWebView();
-                    
-                    // Exclude WebView2 from capture - use a longer delay to ensure child windows are fully created
-                    _ = Task.Delay(1500).ContinueWith(_ =>
-                    {
-                        Dispatcher.Invoke(() =>
-                        {
-                            SetWebViewExcludeFromCapture();
-                        });
-                    });
-                    
-                    Console.WriteLine("MainWindow overlay WebView2 initialized successfully");
+
+                    Console.WriteLine("OverlayWindow WebView2 initialized successfully");
+                }
+
+                // Track MainWindow position/size changes to keep overlay in sync
+                this.LocationChanged += (s, e) => SyncOverlayWindowPosition();
+                this.SizeChanged += (s, e) => SyncOverlayWindowPosition();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error initializing OverlayWindow: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Reposition the separate OverlayWindow to cover exactly the capture area
+        /// (the region inside the MainWindow border, below the header bar).
+        /// Uses the same DWM-based calculation as UpdateCaptureRect().
+        /// </summary>
+        private void SyncOverlayWindowPosition()
+        {
+            if (_overlayWindow == null) return;
+
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return;
+
+                // Compute the capture area in physical screen pixels (same as UpdateCaptureRect)
+                UpdateCaptureRect();
+
+                if (captureRect.Width > 0 && captureRect.Height > 0)
+                {
+                    _overlayWindow.UpdatePosition(
+                        captureRect.Left,
+                        captureRect.Top,
+                        captureRect.Width,
+                        captureRect.Height);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error initializing MainWindow overlay WebView2: {ex.Message}");
+                Console.WriteLine($"Error syncing OverlayWindow position: {ex.Message}");
             }
         }
         
         private void SetWebViewExcludeFromCapture()
         {
-            try
-            {
-                // Check if user wants windows visible in screenshots
-                bool visibleInScreenshots = ConfigManager.Instance.GetWindowsVisibleInScreenshots();
-                uint affinity = visibleInScreenshots ? WDA_NONE : WDA_EXCLUDEFROMCAPTURE;
-                
-                if (textOverlayWebView?.CoreWebView2 != null)
-                {
-                    IntPtr mainWindowHwnd = new WindowInteropHelper(this).Handle;
-                    if (mainWindowHwnd == IntPtr.Zero)
-                    {
-                        return;
-                    }
-
-                    HashSet<IntPtr> processedHandles = new HashSet<IntPtr>();
-                    bool appliedToSeparateWindow = false;
-
-                    void TryApplyAffinity(IntPtr hwnd, string source)
-                    {
-                        if (hwnd == IntPtr.Zero || hwnd == mainWindowHwnd || !processedHandles.Add(hwnd))
-                        {
-                            return;
-                        }
-
-                        bool success = SetWindowDisplayAffinity(hwnd, affinity);
-                        if (success)
-                        {
-                            appliedToSeparateWindow = true;
-                            if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                            {
-                                Console.WriteLine($"MainWindow capture exclusion applied to {source} (HWND: {hwnd})");
-                            }
-                        }
-                        else if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                        {
-                            Console.WriteLine($"Failed to set capture mode for {source}. Last error: {Marshal.GetLastWin32Error()}");
-                        }
-                    }
-
-                    var presentationSource = PresentationSource.FromVisual(textOverlayWebView);
-                    if (presentationSource is HwndSource hwndSource)
-                    {
-                        TryApplyAffinity(hwndSource.Handle, "MainWindow WebView2 HwndSource");
-                    }
-
-                    EnumChildWindows(mainWindowHwnd, (hWnd, lParam) =>
-                    {
-                        StringBuilder className = new StringBuilder(256);
-                        GetClassName(hWnd, className, className.Capacity);
-                        TryApplyAffinity(hWnd, $"MainWindow child '{className}'");
-                        return true;
-                    }, IntPtr.Zero);
-
-                    var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
-                    foreach (System.Diagnostics.ProcessThread thread in currentProcess.Threads)
-                    {
-                        try
-                        {
-                            EnumThreadWindows((uint)thread.Id, (hWnd, lParam) =>
-                            {
-                                if (hWnd == mainWindowHwnd)
-                                {
-                                    return true;
-                                }
-
-                                StringBuilder className = new StringBuilder(256);
-                                GetClassName(hWnd, className, className.Capacity);
-                                string classNameStr = className.ToString();
-                                bool looksLikeWebViewWindow =
-                                    classNameStr.Contains("Chrome_WidgetWin", StringComparison.OrdinalIgnoreCase) ||
-                                    classNameStr.Contains("WebView", StringComparison.OrdinalIgnoreCase) ||
-                                    classNameStr.Contains("Edge", StringComparison.OrdinalIgnoreCase) ||
-                                    classNameStr.Contains("Browser", StringComparison.OrdinalIgnoreCase);
-
-                                if (looksLikeWebViewWindow)
-                                {
-                                    TryApplyAffinity(hWnd, $"MainWindow thread window '{classNameStr}'");
-                                }
-
-                                return true;
-                            }, IntPtr.Zero);
-                        }
-                        catch
-                        {
-                            // Thread may have terminated, ignore
-                        }
-                    }
-
-                    if (!appliedToSeparateWindow && ConfigManager.Instance.GetLogExtraDebugStuff())
-                    {
-                        Console.WriteLine("MainWindow WebView2 exclusion did not find a separate child/owned HWND; capture may still include overlay pixels.");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error setting MainWindow WebView2 capture mode: {ex.Message}");
-            }
+            // Capture exclusion is now handled by the separate OverlayWindow's top-level HWND
+            _overlayWindow?.ApplyCaptureExclusion();
         }
         
         private void ExcludeContextMenuFromCapture(System.Windows.Controls.ContextMenu contextMenu)
@@ -3647,16 +3551,15 @@ namespace UGTLive
         
         public void UpdateMainWindowTextInteraction()
         {
-            // Update the IsHitTestVisible property based on passthrough state (inverse relationship)
+            // Update click-through state on the separate overlay window
             bool mousePassthrough = ConfigManager.Instance.GetMainWindowMousePassthrough();
-            bool canInteract = !mousePassthrough;
             
-            if (textOverlayWebView != null)
+            if (_overlayWindow != null)
             {
-                textOverlayWebView.IsHitTestVisible = canInteract;
+                _overlayWindow.SetClickThrough(mousePassthrough);
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
-                    Console.WriteLine($"MainWindow text interaction: {(canInteract ? "enabled" : "disabled (click-through)")}");
+                    Console.WriteLine($"MainWindow text interaction: {(!mousePassthrough ? "enabled" : "disabled (click-through)")}");
                 }
             }
             
@@ -3682,7 +3585,7 @@ namespace UGTLive
                 return;
             }
 
-            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            if (!_overlayWebViewInitialized || _overlayWindow?.IsWebViewInitialized != true)
             {
                 return;
             }
@@ -3789,7 +3692,7 @@ namespace UGTLive
                 string jsRefitText = refitText.ToString().ToLowerInvariant();
 
                 string script = $"addStreamingOverlay({jsId}, {jsCssClass}, {jsStyle}, {jsText}, {jsRefitText});";
-                textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+                _overlayWindow.ExecuteScript(script);
             }
             catch (Exception ex)
             {
@@ -3799,7 +3702,7 @@ namespace UGTLive
 
         public void ClearStreamingOverlays()
         {
-            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            if (!_overlayWebViewInitialized || _overlayWindow?.IsWebViewInitialized != true)
             {
                 return;
             }
@@ -3812,7 +3715,7 @@ namespace UGTLive
 
             try
             {
-                textOverlayWebView.CoreWebView2.ExecuteScriptAsync("clearAllStreamingOverlays();");
+                _overlayWindow.ExecuteScript("clearAllStreamingOverlays();");
             }
             catch (Exception ex)
             {
@@ -3822,7 +3725,7 @@ namespace UGTLive
 
         public void ClearCommittedOverlays()
         {
-            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            if (!_overlayWebViewInitialized || _overlayWindow?.IsWebViewInitialized != true)
             {
                 return;
             }
@@ -3835,7 +3738,7 @@ namespace UGTLive
 
             try
             {
-                textOverlayWebView.CoreWebView2.ExecuteScriptAsync("clearCommittedOverlays();");
+                _overlayWindow.ExecuteScript("clearCommittedOverlays();");
             }
             catch (Exception ex)
             {
@@ -3850,7 +3753,7 @@ namespace UGTLive
                 return;
             }
 
-            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null || textObj == null)
+            if (!_overlayWebViewInitialized || _overlayWindow?.IsWebViewInitialized != true || textObj == null)
             {
                 return;
             }
@@ -3985,7 +3888,7 @@ namespace UGTLive
                 string jsAudioReady = audioIsReady.ToString().ToLower();
 
                 string script = $"commitStreamingOverlay({jsStreamId}, {jsFinalId}, {jsCssClass}, {jsStyle}, {jsText}, {jsAttributes}, {jsShowAudioIcon}, {jsIconClass}, {jsIconEmoji}, {jsIsSourceForClick}, {jsAudioReady});";
-                textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+                _overlayWindow.ExecuteScript(script);
             }
             catch (Exception ex)
             {
@@ -3995,7 +3898,7 @@ namespace UGTLive
         
         private void UpdateMainWindowOverlayWebView()
         {
-            if (!_overlayWebViewInitialized || textOverlayWebView?.CoreWebView2 == null)
+            if (!_overlayWebViewInitialized || _overlayWindow?.IsWebViewInitialized != true)
             {
                 return;
             }
@@ -4011,7 +3914,7 @@ namespace UGTLive
                 }
                 
                 _lastOverlayHtml = html;
-                textOverlayWebView.CoreWebView2.NavigateToString(html);
+                _overlayWindow.NavigateToHtml(html);
             }
             catch (Exception ex)
             {
@@ -5216,6 +5119,7 @@ namespace UGTLive
                 SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
             _toolbarWindow?.BringToFront();
+            _overlayWindow?.BringToFront();
         }
 
         protected override void OnDeactivated(EventArgs e)
@@ -5287,27 +5191,11 @@ namespace UGTLive
         // Helper method to update mouse passthrough state
         private void updateMousePassthrough(bool enabled)
         {
-            if (OverlayContent == null)
+            if (_overlayWindow == null)
                 return;
                 
-            if (enabled)
-            {
-                // Enable mouse passthrough - clicks go through to apps behind
-                OverlayContent.IsHitTestVisible = false;
-                OverlayContent.Background = System.Windows.Media.Brushes.Transparent;
-                Console.WriteLine("Mouse passthrough: overlay now transparent and non-interactive");
-            }
-            else
-            {
-                // Disable mouse passthrough - allow interaction with text overlays
-                OverlayContent.IsHitTestVisible = true;
-                OverlayContent.Background = new System.Windows.Media.SolidColorBrush(
-                    System.Windows.Media.Color.FromArgb(1, 0, 0, 0)); // #01000000
-                if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                {
-                    Console.WriteLine("Mouse passthrough: overlay now interactive with minimal background");
-                }
-            }
+            _overlayWindow.SetClickThrough(enabled);
+            Console.WriteLine($"Mouse passthrough: overlay now {(enabled ? "transparent and non-interactive" : "interactive")}");
         }
         
         // Handle WebView2 web messages for context menu
@@ -5376,10 +5264,10 @@ namespace UGTLive
         {
             try
             {
-                if (textOverlayWebView?.CoreWebView2 != null)
+                if (_overlayWindow?.IsWebViewInitialized == true)
                 {
                     string script = $"updateAudioIcon('{textObjectId}', {isPlaying.ToString().ToLower()});";
-                    textOverlayWebView.CoreWebView2.ExecuteScriptAsync(script);
+                    _overlayWindow.ExecuteScript(script);
                 }
             }
             catch (Exception ex)
@@ -5438,9 +5326,9 @@ namespace UGTLive
                 {
                     try
                     {
-                        System.Windows.Point contentPoint = new System.Windows.Point(clientX, clientY);
-                        System.Windows.Point relativeToWebView = textOverlayWebView.TranslatePoint(contentPoint, this);
-                        System.Windows.Point screenPoint = this.PointToScreen(relativeToWebView);
+                        System.Windows.Point screenPoint = _overlayWindow != null
+                            ? _overlayWindow.WebViewClientToScreen(clientX, clientY)
+                            : new System.Windows.Point(clientX, clientY);
                         
                         System.Windows.Controls.ContextMenu contextMenu = CreateMainWindowOverlayContextMenu();
                         contextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.AbsolutePoint;
