@@ -780,13 +780,12 @@ namespace UGTLive
                                     bForceRender = true;
                                 }
                                 // Generic LLM OCR handles its own change detection; bypass settle time
+                                // but still let the content hash check prevent duplicate renders
                                 else if (ocrMethod == "Generic LLM OCR")
                                 {
                                     _lastChangeTime = DateTime.MinValue;
                                     _settlingStartTime = DateTime.MinValue;
                                     _settlingHash = null;
-                                    _lastOcrHash = contentHash;
-                                    bForceRender = true;
                                 }
                                 // If OCR found no text, bypass settling — nothing to settle on
                                 else if (modifiedResults.GetArrayLength() == 0)
@@ -1014,7 +1013,7 @@ namespace UGTLive
                                     }
                                     // Clear stored bitmap since hash matches and we're not displaying new results
                                     ClearCurrentProcessingBitmap();
-                                    OnFinishedThings(true);
+                                    OnFinishedThings(true, skipOverlayRefresh: true);
                                     return;
                                 }
                                

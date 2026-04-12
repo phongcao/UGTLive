@@ -1089,16 +1089,22 @@ namespace UGTLive
         public string GetGenericLlmOcrMode()
         {
             string mode = GetValue(GENERIC_LLM_OCR_MODE, "OCR + Translate");
-            return string.Equals(mode, "OCR Only", StringComparison.OrdinalIgnoreCase)
-                ? "OCR Only"
-                : "OCR + Translate";
+            if (string.Equals(mode, "OCR Only", StringComparison.OrdinalIgnoreCase))
+                return "OCR Only";
+            if (string.Equals(mode, "OCR Then Translate", StringComparison.OrdinalIgnoreCase))
+                return "OCR Then Translate";
+            return "OCR + Translate";
         }
 
         public void SetGenericLlmOcrMode(string mode)
         {
-            string normalized = string.Equals(mode, "OCR Only", StringComparison.OrdinalIgnoreCase)
-                ? "OCR Only"
-                : "OCR + Translate";
+            string normalized;
+            if (string.Equals(mode, "OCR Only", StringComparison.OrdinalIgnoreCase))
+                normalized = "OCR Only";
+            else if (string.Equals(mode, "OCR Then Translate", StringComparison.OrdinalIgnoreCase))
+                normalized = "OCR Then Translate";
+            else
+                normalized = "OCR + Translate";
             _configValues[GENERIC_LLM_OCR_MODE] = normalized;
             SaveConfig();
         }

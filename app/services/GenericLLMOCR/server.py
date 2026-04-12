@@ -73,6 +73,7 @@ DEBUG_IMAGE_ENV_VAR = "UGTLIVE_VISUAL_STUDIO_DEBUG"
 
 MODE_OCR_ONLY = "OCR Only"
 MODE_OCR_TRANSLATE = "OCR + Translate"
+MODE_OCR_THEN_TRANSLATE = "OCR Then Translate"
 
 PROMPT_IGNORE_COMMON_MENU_TEXT = (
     "Ignore routine in-game menu labels, navigation UI, and HUD text that is generic or repeatedly present across frames. "
@@ -111,6 +112,17 @@ PROMPT_OCR_TRANSLATE = (
     f"If no readable text is present, output EXACTLY {NO_TEXT_SENTINEL} and nothing else.\n"
     f"Never translate, explain, or wrap {NO_TEXT_SENTINEL} in any extra text.\n"
     "Output ONLY the list, no extra explanation."
+)
+
+PROMPT_TRANSLATE_TEXT = (
+    "You are a translation engine. Translate each numbered line below from {source_lang} to {target_lang}.\n"
+    "Output EXACTLY the same number of lines, each prefixed with the SAME number.\n"
+    "Do NOT add, remove, or reorder lines. Do NOT add explanations.\n"
+    "Format:\n"
+    "1. <translated text>\n"
+    "2. <translated text>\n"
+    "...\n"
+    "Output ONLY the numbered translations. /no_think"
 )
 
 NO_TEXT_RESPONSE_PATTERNS = {
@@ -214,9 +226,9 @@ def configure_runtime_logging() -> logging.Logger:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
 
     logger = logging.getLogger("generic_llm_ocr")
     if logger.handlers:
@@ -315,8 +327,11 @@ def load_runtime_settings() -> Dict[str, str]:
 
 
 def normalize_mode(mode: str) -> str:
-    if mode.strip().lower() == MODE_OCR_ONLY.lower():
+    stripped = mode.strip().lower()
+    if stripped == MODE_OCR_ONLY.lower():
         return MODE_OCR_ONLY
+    if stripped == MODE_OCR_THEN_TRANSLATE.lower():
+        return MODE_OCR_THEN_TRANSLATE
     return MODE_OCR_TRANSLATE
 
 
@@ -366,7 +381,7 @@ def build_prompt(
     ignore_menu_text: bool,
 ) -> str:
     ignore_menu_text_prompt = f"{PROMPT_IGNORE_COMMON_MENU_TEXT} " if ignore_menu_text else ""
-    if mode == MODE_OCR_ONLY:
+    if mode == MODE_OCR_ONLY or mode == MODE_OCR_THEN_TRANSLATE:
         return (
             f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. "
             f"{ignore_menu_text_prompt}{PROMPT_OCR_ONLY} /no_think"
@@ -616,6 +631,95 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
     return content, model, mode
 
 
+def query_llm_translate_text(
+    text_objects: List[Dict],
+    runtime_config: Dict[str, str],
+    source_lang: str,
+    target_lang: str,
+) -> List[str]:
+    """Make a text-only LLM call to translate OCR results in a second pass."""
+    if not text_objects:
+        return []
+
+    api_base = runtime_config.get("generic_llm_ocr_api_base", DEFAULT_API_BASE)
+    api_key = runtime_config.get("generic_llm_ocr_api_key", "")
+    model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
+    endpoint = build_endpoint(api_base)
+
+    # Build numbered list of source texts
+    numbered_lines = []
+    for i, obj in enumerate(text_objects, 1):
+        numbered_lines.append(f"{i}. {obj['text']}")
+    numbered_text = "\n".join(numbered_lines)
+
+    prompt = PROMPT_TRANSLATE_TEXT.format(
+        source_lang=get_language_name(source_lang),
+        target_lang=get_language_name(target_lang),
+    ) + "\n\n" + numbered_text
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 4096,
+    }
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+    headers = {"Content-Type": "application/json"}
+    if api_key and not api_key.startswith("<your"):
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    request_started = time.time()
+    LOGGER.info(
+        "LLM translation request start model=%s endpoint=%s source_lang=%s target_lang=%s text_count=%s",
+        model, endpoint, source_lang, target_lang, len(text_objects),
+    )
+
+    try:
+        response = _LLM_SESSION.post(endpoint, json=payload, headers=headers, timeout=180)
+        response.raise_for_status()
+    except requests.RequestException:
+        LOGGER.exception(
+            "LLM translation request failed model=%s endpoint=%s after %.1f ms",
+            model, endpoint, (time.time() - request_started) * 1000.0,
+        )
+        raise
+
+    response_json = response.json()
+    content = response_json["choices"][0]["message"]["content"]
+    usage = response_json.get("usage", {})
+    LOGGER.info(
+        "LLM translation request complete model=%s duration_ms=%.1f response_chars=%s prompt_tokens=%s completion_tokens=%s",
+        model,
+        (time.time() - request_started) * 1000.0,
+        len(content or ""),
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+    )
+    LOGGER.info("LLM translation raw response: %s", content)
+
+    # Parse numbered translations from response
+    translations: List[str] = [""] * len(text_objects)
+    if content:
+        for line in content.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Match lines like "1. translated text" or "1) translated text"
+            m = re.match(r"^(\d+)[.)]\s*(.+)$", line)
+            if m:
+                idx = int(m.group(1)) - 1
+                if 0 <= idx < len(translations):
+                    translations[idx] = m.group(2).strip()
+
+    return translations
+
+
 def process_llm_results(
     image: Image.Image,
     raw_response: str,
@@ -679,6 +783,17 @@ def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -
         llm_image.height,
     )
     t_post = time.time()
+
+    # Second pass: translate OCR results via a text-only LLM call
+    if mode == MODE_OCR_THEN_TRANSLATE and text_objects:
+        translations = query_llm_translate_text(
+            text_objects, runtime_config, source_lang, target_lang,
+        )
+        for obj, trans in zip(text_objects, translations):
+            if trans:
+                obj["translated_text"] = trans
+        t_post = time.time()
+
     LOGGER.info(
         "Timing: image_prep=%.1fms llm_call=%.1fms post_process=%.1fms total=%.1fms response_chars=%s",
         (t_prep - t0) * 1000.0,

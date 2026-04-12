@@ -288,9 +288,10 @@
                                     <TextBlock Text="Mode:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                     <ComboBox x:Name="genericLlmOcrModeComboBox" Grid.Row="3" Grid.Column="1"
                                               SelectionChanged="GenericLlmOcrModeComboBox_SelectionChanged"
-                                              ToolTip="OCR Only performs detection only. OCR + Translate returns translated text in the same request.">
+                                              ToolTip="OCR Only performs detection only. OCR + Translate returns translated text in the same request. OCR Then Translate does OCR first, then translates in a separate LLM call.">
                                         <ComboBoxItem Content="OCR + Translate"/>
                                         <ComboBoxItem Content="OCR Only"/>
+                                        <ComboBoxItem Content="OCR Then Translate"/>
                                     </ComboBox>
                                 </Grid>
                                 
