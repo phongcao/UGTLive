@@ -10,8 +10,10 @@ Usage:
     python benchmark.py ocr          # OCR only
     python benchmark.py translate    # Translation only (uses OCR results)
     python benchmark.py tts          # TTS only (uses hardcoded sample text)
+    python benchmark.py dialog_tts   # Dialog TTS filter only (LLM text cleanup)
     python benchmark.py ocr+translate  # OCR then separate translation pass
-    python benchmark.py full         # Full pipeline: OCR -> Translate -> TTS
+    python benchmark.py full         # Full pipeline: OCR -> Translate -> Dialog TTS -> TTS
+    python benchmark.py full_combined # Full pipeline using single OCR+Translate call
 """
 
 import argparse
@@ -280,6 +282,132 @@ def benchmark_translate(
 
 
 # ---------------------------------------------------------------------------
+# Dialog TTS filter benchmark (LLM text-only call to clean text for TTS)
+# ---------------------------------------------------------------------------
+NO_DIALOG_SENTINEL = "__UGTLIVE_NO_DIALOG__"
+
+DIALOG_FILTER_SYSTEM_PROMPT = (
+    "You clean text before video-game text-to-speech playback. Keep only actual spoken dialogue "
+    "or narration that should be read aloud. "
+    "Remove speaker names, name tags, menu labels, HUD text, button prompts, inventory/status text, "
+    "quest headers, control hints, and standalone character names unless they are part of a spoken sentence. "
+    "Keep the original language and wording of the remaining spoken text. "
+    f"If nothing should be spoken, reply with EXACTLY {NO_DIALOG_SENTINEL}. "
+    "Reply with only the cleaned text and nothing else."
+)
+
+NO_DIALOG_RESPONSES = {
+    NO_DIALOG_SENTINEL.lower(),
+    "no dialog",
+    "no spoken dialog",
+    "no spoken dialogue",
+    "nothing to speak",
+    "none",
+}
+
+
+def is_no_dialog_response(text: str) -> bool:
+    return (text or "").strip().lower() in NO_DIALOG_RESPONSES
+
+
+def benchmark_dialog_filter(
+    texts: List[str],
+    config: Dict[str, str],
+    language_code: str,
+    iterations: int = 1,
+) -> Tuple[List[Optional[str]], float]:
+    """
+    Send each text through the Dialog TTS filter LLM call (mirrors
+    DialogTtsFilterService.cs) and measure response time.
+    Returns (filtered_texts, avg_time_seconds).  A None entry means
+    the LLM decided nothing should be spoken.
+    """
+    if not texts:
+        print("  SKIP: No texts to filter.")
+        return [], 0.0
+
+    api_base = config.get("generic_llm_ocr_api_base", "http://127.0.0.1:1234")
+    api_key = config.get("generic_llm_ocr_api_key", "")
+    model = config.get("generic_llm_ocr_model", "qwen2.5-vl-7b-instruct")
+
+    endpoint = api_base.rstrip("/")
+    if not endpoint.endswith("/chat/completions"):
+        if endpoint.endswith("/v1"):
+            endpoint += "/chat/completions"
+        else:
+            endpoint += "/v1/chat/completions"
+
+    LANGUAGE_NAMES = {
+        "en": "English", "ja": "Japanese", "ko": "Korean",
+        "zh": "Chinese", "zh-TW": "Traditional Chinese", "ch_tra": "Traditional Chinese",
+        "ch_sim": "Simplified Chinese", "vi": "Vietnamese", "es": "Spanish",
+        "fr": "French", "de": "German", "ru": "Russian", "th": "Thai",
+    }
+    lang_name = LANGUAGE_NAMES.get(language_code, language_code or "unknown")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key and not api_key.startswith("<your"):
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    print(f"  LLM endpoint: {endpoint}")
+    print(f"  Model: {model}")
+    print(f"  Language hint: {lang_name}")
+    print(f"  Texts to filter: {len(texts)}")
+
+    times: List[float] = []
+    last_filtered: List[Optional[str]] = []
+
+    for i in range(iterations):
+        filtered: List[Optional[str]] = []
+        iter_start = time.perf_counter()
+
+        for j, text in enumerate(texts):
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": DIALOG_FILTER_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Language hint: {lang_name}\n\nText to clean for TTS:\n{text}",
+                    },
+                ],
+                "temperature": 0,
+                "max_tokens": 512,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+
+            t0 = time.perf_counter()
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=60)
+            elapsed = time.perf_counter() - t0
+            resp.raise_for_status()
+
+            data = resp.json()
+            content = (data["choices"][0]["message"]["content"] or "").strip()
+            usage = data.get("usage", {})
+
+            if is_no_dialog_response(content):
+                filtered.append(None)
+                label = "(no dialog)"
+            else:
+                filtered.append(content)
+                label = content[:80] + ("..." if len(content) > 80 else "")
+
+            print(
+                f"  [{i+1}/{iterations}] DIALOG_FILTER[{j}]  {elapsed*1000:8.1f} ms  "
+                f"prompt_tokens={usage.get('prompt_tokens', '?')}  "
+                f"completion_tokens={usage.get('completion_tokens', '?')}  "
+                f"result={label}"
+            )
+
+        iter_total = time.perf_counter() - iter_start
+        times.append(iter_total)
+        last_filtered = filtered
+
+    avg = sum(times) / len(times) if times else 0
+    return last_filtered, avg
+
+
+# ---------------------------------------------------------------------------
 # TTS benchmark
 # ---------------------------------------------------------------------------
 def benchmark_tts(
@@ -370,6 +498,7 @@ def print_summary(results: Dict[str, float]) -> None:
     ocr_ms = results.get("OCR", 0.0)
     translate_ms = results.get("Translate", 0.0)
     ocr_translate_ms = results.get("OCR+Translate", 0.0)
+    dialog_filter_ms = results.get("Dialog Filter", 0.0)
     tts_ms = results.get("TTS", 0.0)
 
     # Show combined single-call OCR+Translate if measured
@@ -383,12 +512,15 @@ def print_summary(results: Dict[str, float]) -> None:
         print(f"  {'Translate':<20s}  {translate_ms:8.1f} ms")
     if ocr_ms > 0 and translate_ms > 0:
         print(f"  {'OCR + Translate':<20s}  {ocr_ms + translate_ms:8.1f} ms")
+    if dialog_filter_ms > 0:
+        print(f"  {'Dialog Filter':<20s}  {dialog_filter_ms:8.1f} ms")
     if tts_ms > 0:
         print(f"  {'TTS':<20s}  {tts_ms:8.1f} ms")
 
     # Include any other stages not covered above
+    known = {"OCR", "Translate", "TTS", "OCR+Translate", "Dialog Filter"}
     for stage, avg_ms in results.items():
-        if stage not in ("OCR", "Translate", "TTS", "OCR+Translate") and avg_ms > 0:
+        if stage not in known and avg_ms > 0:
             print(f"  {stage:<20s}  {avg_ms:8.1f} ms")
 
     total = sum(results.values())
@@ -405,7 +537,7 @@ def main():
         "stages",
         nargs="*",
         default=["all"],
-        help="Stages to run: ocr, translate, tts, ocr+translate, ocr_translate, full, all (default: all)",
+        help="Stages to run: ocr, translate, dialog_tts, tts, ocr+translate, ocr_translate, full, full_combined, all (default: all)",
     )
     parser.add_argument("--image", type=str, default=None, help="Path to test image")
     parser.add_argument("--iterations", "-n", type=int, default=1, help="Iterations per stage")
@@ -427,10 +559,13 @@ def main():
     for s in args.stages:
         s = s.lower().strip()
         if s == "all":
-            stages = {"ocr", "translate", "tts"}
+            stages = {"ocr", "translate", "dialog_tts", "tts"}
             break
         elif s == "full":
-            stages = {"ocr", "translate", "tts"}
+            stages = {"ocr", "translate", "dialog_tts", "tts"}
+            break
+        elif s in ("full_combined", "fullcombined"):
+            stages = {"ocr_translate", "dialog_tts", "tts"}
             break
         elif s == "ocr+translate":
             stages.update({"ocr", "translate"})
@@ -515,11 +650,48 @@ def main():
             results["Translate"] = 0.0
         print()
 
+    # --- Dialog TTS Filter ---
+    dialog_filtered: List[Optional[str]] = []
+    if "dialog_tts" in stages:
+        print("--- DIALOG TTS FILTER ---")
+        # Determine the texts to filter: prefer translations, fall back to OCR text
+        filter_input: List[str] = []
+        if translations:
+            filter_input = [t for t in translations if t]
+        elif text_objects:
+            filter_input = [
+                obj.get("translated_text", obj["text"])
+                for obj in text_objects
+                if obj.get("translated_text") or obj.get("text")
+            ]
+
+        if not filter_input:
+            filter_input = [
+                "Taro: Let's go to the castle!",
+                "HP  120/120",
+                "Save   Load   Settings",
+                "I can't believe the dragon is still alive...",
+            ]
+            print("  (Using sample texts since no OCR/translation output is available)")
+
+        dialog_filtered, avg = benchmark_dialog_filter(
+            filter_input, config, target_lang, args.iterations,
+        )
+        results["Dialog Filter"] = avg * 1000
+
+        print(f"\n  Filter results:")
+        for idx, (src, filt) in enumerate(zip(filter_input, dialog_filtered)):
+            status = filt if filt is not None else "(suppressed)"
+            print(f"    [{idx}] {src[:60]}  ->  {status}")
+        print()
+
     # --- TTS ---
     if "tts" in stages:
         print("--- TTS ---")
         if args.tts_text:
             tts_texts = [args.tts_text]
+        elif dialog_filtered:
+            tts_texts = [t for t in dialog_filtered if t]
         elif translations:
             tts_texts = [t for t in translations if t]
         elif text_objects:
