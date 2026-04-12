@@ -360,9 +360,26 @@ def print_summary(results: Dict[str, float]) -> None:
     print("BENCHMARK SUMMARY")
     print("=" * 60)
     total = 0.0
+    ocr_ms = results.get("OCR", 0.0)
+    translate_ms = results.get("Translate", 0.0)
+    tts_ms = results.get("TTS", 0.0)
+
+    # Show individual OCR and Translate if both were measured
+    if ocr_ms > 0:
+        print(f"  {'OCR':<20s}  {ocr_ms:8.1f} ms")
+    if translate_ms > 0:
+        print(f"  {'Translate':<20s}  {translate_ms:8.1f} ms")
+    if ocr_ms > 0 and translate_ms > 0:
+        print(f"  {'OCR + Translate':<20s}  {ocr_ms + translate_ms:8.1f} ms")
+    if tts_ms > 0:
+        print(f"  {'TTS':<20s}  {tts_ms:8.1f} ms")
+
+    # Include any other stages not covered above
     for stage, avg_ms in results.items():
-        print(f"  {stage:<20s}  {avg_ms:8.1f} ms")
-        total += avg_ms
+        if stage not in ("OCR", "Translate", "TTS") and avg_ms > 0:
+            print(f"  {stage:<20s}  {avg_ms:8.1f} ms")
+
+    total = sum(results.values())
     print(f"  {'TOTAL':<20s}  {total:8.1f} ms")
     print("=" * 60)
 

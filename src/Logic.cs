@@ -640,6 +640,15 @@ namespace UGTLive
             LogManager.Instance.LogOcrResponse(data);
             
             _ocrProcessingStopwatch.Restart();
+
+            // Capture OCR-only time: elapsed since BeginOcrTranslateCycle()
+            lock (_processingTimingLock)
+            {
+                if (_ocrTranslateCycleStopwatch.IsRunning)
+                {
+                    TranslationStatus.SetLastOcrProcessingTime(_ocrTranslateCycleStopwatch.ElapsedMilliseconds);
+                }
+            }
             
             // Reset auto-play trigger flag to allow auto-play on new OCR results
             AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
@@ -1564,6 +1573,9 @@ namespace UGTLive
 
                                     _lastChangeTime = DateTime.MinValue;
                                     _lastTranslationTime = DateTime.Now;
+
+                                    // OCR service already included translation — clear separate translate stat
+                                    TranslationStatus.ClearLastTranslateProcessingTime();
                                     
                                     // Reset "keep translation visible" flag and clean up old text objects
                                     // BEFORE FinalizeAppliedTranslations, so RefreshOverlays renders the
@@ -3978,6 +3990,7 @@ namespace UGTLive
                 }
 
                 _translationStopwatch.Stop();
+                TranslationStatus.SetLastTranslateProcessingTime(_translationStopwatch.ElapsedMilliseconds);
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
                     Log($"Translation took {_translationStopwatch.ElapsedMilliseconds} ms");

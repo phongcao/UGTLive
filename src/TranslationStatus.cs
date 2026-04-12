@@ -26,6 +26,12 @@ namespace UGTLive
         // Last completed end-to-end OCR + translation processing time in milliseconds
         private static long? _lastOcrTranslateProcessingTimeMs = null;
 
+        // Last completed OCR-only processing time in milliseconds
+        private static long? _lastOcrProcessingTimeMs = null;
+
+        // Last completed translation-only processing time in milliseconds
+        private static long? _lastTranslateProcessingTimeMs = null;
+
         // Last completed TTS processing time in milliseconds
         private static long? _lastTtsProcessingTimeMs = null;
         
@@ -131,6 +137,17 @@ namespace UGTLive
         }
 
         /// <summary>
+        /// Clear the last translation-only processing time (e.g. when OCR includes translations).
+        /// </summary>
+        public static void ClearLastTranslateProcessingTime()
+        {
+            lock (_lock)
+            {
+                _lastTranslateProcessingTimeMs = null;
+            }
+        }
+
+        /// <summary>
         /// Record the last completed OCR + translation processing time.
         /// </summary>
         public static void SetLastOcrTranslateProcessingTime(long elapsedMilliseconds)
@@ -138,6 +155,28 @@ namespace UGTLive
             lock (_lock)
             {
                 _lastOcrTranslateProcessingTimeMs = elapsedMilliseconds;
+            }
+        }
+
+        /// <summary>
+        /// Record the last completed OCR-only processing time.
+        /// </summary>
+        public static void SetLastOcrProcessingTime(long elapsedMilliseconds)
+        {
+            lock (_lock)
+            {
+                _lastOcrProcessingTimeMs = elapsedMilliseconds;
+            }
+        }
+
+        /// <summary>
+        /// Record the last completed translation-only processing time.
+        /// </summary>
+        public static void SetLastTranslateProcessingTime(long elapsedMilliseconds)
+        {
+            lock (_lock)
+            {
+                _lastTranslateProcessingTimeMs = elapsedMilliseconds;
             }
         }
 
@@ -159,9 +198,10 @@ namespace UGTLive
         {
             lock (_lock)
             {
-                string ocrTranslateTime = FormatElapsedMilliseconds(_lastOcrTranslateProcessingTimeMs);
+                string ocrTime = FormatElapsedMilliseconds(_lastOcrProcessingTimeMs);
+                string translateTime = FormatElapsedMilliseconds(_lastTranslateProcessingTimeMs);
                 string ttsTime = FormatElapsedMilliseconds(_lastTtsProcessingTimeMs);
-                return $"{ocrMethod} (fps: {fps:F1}, ocr+tr: {ocrTranslateTime}, tts: {ttsTime})";
+                return $"{ocrMethod} (fps: {fps:F1}, ocr: {ocrTime}, tr: {translateTime}, tts: {ttsTime})";
             }
         }
 
