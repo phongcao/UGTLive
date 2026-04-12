@@ -76,6 +76,9 @@ namespace UGTLive
         
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
         
         private delegate bool EnumWindowsDelegate(IntPtr hWnd, IntPtr lParam);
         
@@ -2336,6 +2339,10 @@ namespace UGTLive
 
             //if capture rect is less than 1 pixel, don't capture
             if (captureRect.Width < 1 || captureRect.Height < 1) return;
+
+            // Skip capture when the target window is minimized — PrintWindow and
+            // CopyFromScreen both return blank/black frames for minimized windows.
+            if (_targetWindowHandle != IntPtr.Zero && IsIconic(_targetWindowHandle)) return;
 
             bool needsCleanCaptureForOcr = GetIsStarted() && GetOCRCheckIsWanted();
             string ocrMethod = GetSelectedOcrMethod();
