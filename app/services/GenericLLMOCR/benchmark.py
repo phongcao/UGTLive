@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import base64
+import io
 import json
 import re
 import sys
@@ -94,6 +95,7 @@ def benchmark_ocr(
     target_lang: str,
     iterations: int = 1,
     force_ocr_only: bool = False,
+    force_mode: Optional[str] = None,
 ) -> Tuple[List[Dict], float]:
     """
     Call the LLM vision API directly, reusing server.py helpers for prompt
@@ -103,7 +105,12 @@ def benchmark_ocr(
     api_base = config.get("generic_llm_ocr_api_base", "http://127.0.0.1:1234")
     api_key = config.get("generic_llm_ocr_api_key", "")
     model = config.get("generic_llm_ocr_model", "qwen2.5-vl-7b-instruct")
-    mode = MODE_OCR_ONLY if force_ocr_only else normalize_mode(config.get("generic_llm_ocr_mode", "OCR + Translate"))
+    if force_mode:
+        mode = force_mode
+    elif force_ocr_only:
+        mode = MODE_OCR_ONLY
+    else:
+        mode = normalize_mode(config.get("generic_llm_ocr_mode", "OCR + Translate"))
     ignore_menu = (config.get("generic_llm_ocr_ignore_menu_text", "false") or "").strip().lower() == "true"
 
     endpoint = build_endpoint(api_base)
@@ -362,7 +369,12 @@ def print_summary(results: Dict[str, float]) -> None:
     total = 0.0
     ocr_ms = results.get("OCR", 0.0)
     translate_ms = results.get("Translate", 0.0)
+    ocr_translate_ms = results.get("OCR+Translate", 0.0)
     tts_ms = results.get("TTS", 0.0)
+
+    # Show combined single-call OCR+Translate if measured
+    if ocr_translate_ms > 0:
+        print(f"  {'OCR+Translate':<20s}  {ocr_translate_ms:8.1f} ms")
 
     # Show individual OCR and Translate if both were measured
     if ocr_ms > 0:
@@ -376,7 +388,7 @@ def print_summary(results: Dict[str, float]) -> None:
 
     # Include any other stages not covered above
     for stage, avg_ms in results.items():
-        if stage not in ("OCR", "Translate", "TTS") and avg_ms > 0:
+        if stage not in ("OCR", "Translate", "TTS", "OCR+Translate") and avg_ms > 0:
             print(f"  {stage:<20s}  {avg_ms:8.1f} ms")
 
     total = sum(results.values())
@@ -393,7 +405,7 @@ def main():
         "stages",
         nargs="*",
         default=["all"],
-        help="Stages to run: ocr, translate, tts, ocr+translate, full, all (default: all)",
+        help="Stages to run: ocr, translate, tts, ocr+translate, ocr_translate, full, all (default: all)",
     )
     parser.add_argument("--image", type=str, default=None, help="Path to test image")
     parser.add_argument("--iterations", "-n", type=int, default=1, help="Iterations per stage")
@@ -401,6 +413,10 @@ def main():
     parser.add_argument("--target-lang", type=str, default=None, help="Target language (default: from config)")
     parser.add_argument("--tts-text", type=str, default=None, help="Override TTS text (instead of using OCR output)")
     args = parser.parse_args()
+
+    # Capture all output to save as a log file
+    log_capture = io.StringIO()
+    sys.stdout = TeeWriter(sys.__stdout__, log_capture)
 
     config = load_config()
     source_lang = args.source_lang or config.get("source_language", "ja")
@@ -418,6 +434,8 @@ def main():
             break
         elif s == "ocr+translate":
             stages.update({"ocr", "translate"})
+        elif s in ("ocr_translate", "ocrtranslate"):
+            stages.add("ocr_translate")
         else:
             stages.add(s)
 
@@ -439,6 +457,23 @@ def main():
     results: Dict[str, float] = {}
     text_objects: List[Dict] = []
     translations: List[str] = []
+
+    # --- OCR + Translate (single combined LLM call) ---
+    if "ocr_translate" in stages:
+        print("--- OCR + TRANSLATE (single call) ---")
+        text_objects, avg = benchmark_ocr(
+            image, config, source_lang, target_lang, args.iterations,
+            force_mode=MODE_OCR_TRANSLATE,
+        )
+        results["OCR+Translate"] = avg * 1000
+        print(f"\n  Detected {len(text_objects)} text region(s):")
+        print_texts(text_objects)
+        # Collect translations for TTS
+        translations = [
+            obj.get("translated_text", obj["text"])
+            for obj in text_objects
+        ]
+        print()
 
     # --- OCR ---
     if "ocr" in stages:
@@ -504,6 +539,39 @@ def main():
         print()
 
     print_summary(results)
+
+    # Save full output to debug folder
+    save_benchmark_log(log_capture, sorted(stages))
+
+
+class TeeWriter:
+    """Write to both the original stream and a StringIO capture buffer."""
+
+    def __init__(self, original: io.TextIOBase, capture: io.StringIO):
+        self._original = original
+        self._capture = capture
+
+    def write(self, text: str) -> int:
+        self._original.write(text)
+        self._capture.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self._original.flush()
+
+    # Forward any other attribute lookups to the original stream
+    def __getattr__(self, name: str):
+        return getattr(self._original, name)
+
+
+def save_benchmark_log(capture: io.StringIO, stages: list) -> None:
+    """Write captured output to a timestamped file in the debug folder."""
+    DEBUG_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    stage_tag = "_".join(stages) if stages else "all"
+    log_path = DEBUG_IMAGE_DIR / f"benchmark_{timestamp}_{stage_tag}.txt"
+    log_path.write_text(capture.getvalue(), encoding="utf-8")
+    print(f"\nLog saved to {log_path}")
 
 
 if __name__ == "__main__":
