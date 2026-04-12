@@ -1289,46 +1289,14 @@ namespace UGTLive
             previousCaptureY = captureRect.Top;
 
             // TARGET WINDOW CAPTURE MODE
-            // When a target window is configured (e.g. a game like PAL4), captureRect must be
-            // based on the target window's visible bounds instead of the MainWindow. This ensures:
-            //   1. The capture bitmap covers the full target window content.
-            //   2. The overlay window is positioned over the target window (not the MainWindow).
-            //   3. OCR bounding-box coordinates (relative to the captured bitmap) map 1:1 to
-            //      overlay CSS positions, so translated text appears at the correct location.
-            // Without this, captureRect would reflect the MainWindow's content area, causing
-            // a coordinate mismatch between the captured image and the overlay.
-            bool usedTargetWindow = false;
-            IntPtr targetHwnd = GetTargetWindowHandle();
-            if (targetHwnd != IntPtr.Zero)
-            {
-                try
-                {
-                    RECT targetRect;
-                    int tResult = DwmGetWindowAttribute(targetHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out targetRect,
-                        System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
-                    if (tResult != 0)
-                        GetWindowRect(targetHwnd, out targetRect);
+            // Resolve the target window handle so TryCaptureTargetWindow can use PrintWindow
+            // for capture. However, captureRect is always based on the MainWindow's content
+            // area (the red rectangle), even in target window mode. This allows the user to
+            // position/resize the red rectangle to select a sub-region within the target window.
+            // TryCaptureTargetWindow crops the PrintWindow bitmap using captureRect's offset
+            // from the target window origin, so only the selected region is captured.
+            GetTargetWindowHandle();
 
-                    if (targetRect.Width > 0 && targetRect.Height > 0)
-                    {
-                        captureRect = new System.Drawing.Rectangle(
-                            targetRect.Left, targetRect.Top, targetRect.Width, targetRect.Height);
-                        usedTargetWindow = true;
-
-                        if (_logCaptureRectOnce && ConfigManager.Instance.GetLogExtraDebugStuff())
-                        {
-                            _logCaptureRectOnce = false;
-                            Console.WriteLine($"[DEBUG] Target window capture rect: L={targetRect.Left}, T={targetRect.Top}, {targetRect.Width}x{targetRect.Height}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[UpdateCaptureRect] Target window rect failed: {ex.Message}");
-                }
-            }
-
-            if (!usedTargetWindow)
             {
                 // The capture area matches the old OverlayContent margin: Left=15, Top=50, Right=15, Bottom=15 (in DIPs).
                 // These are the same values that were in MainWindow.xaml for the OverlayContent grid.
@@ -2326,9 +2294,9 @@ namespace UGTLive
             // Update the capture rectangle to ensure correct dimensions
             UpdateCaptureRect();
 
-            // In target window mode, keep the overlay positioned over the target window.
-            // SyncOverlayWindowPosition only fires on MainWindow move/resize, so we must
-            // update the overlay here each capture cycle to track the target window.
+            // In target window mode, refresh the overlay position each capture cycle.
+            // SyncOverlayWindowPosition only fires on MainWindow move/resize, so this
+            // provides an extra safety net to keep the overlay in sync.
             if (_targetWindowHandle != IntPtr.Zero && _overlayWindow != null
                 && captureRect.Width > 0 && captureRect.Height > 0)
             {
