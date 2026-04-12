@@ -8,9 +8,8 @@ set "VENV_DIR=%SCRIPT_DIR%venv"
 set "LOG_DIR=%SCRIPT_DIR%logs"
 set "LOG_FILE=%SCRIPT_DIR%server_log.txt"
 set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
-set "SESSION_STAMP=%DATE:~-4%%DATE:~3,2%%DATE:~0,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
-set "SESSION_STAMP=%SESSION_STAMP: =0%"
-set "SESSION_LOG_FILE=%LOG_DIR%\console_%SESSION_STAMP%_%RANDOM%.log"
+set "SERVICE_PORT=5005"
+set "SESSION_STAMP="
 
 set "ENV_NAME="
 set "SERVICE_NAME="
@@ -23,6 +22,7 @@ if exist "%CONFIG_FILE%" (
         for /f "tokens=*" %%y in ("!VALUE!") do set "VALUE=%%y"
         if "!KEY!"=="venv_name" set "ENV_NAME=!VALUE!"
         if "!KEY!"=="service_name" set "SERVICE_NAME=!VALUE!"
+        if "!KEY!"=="port" set "SERVICE_PORT=!VALUE!"
     )
 )
 
@@ -34,13 +34,17 @@ if "!ENV_NAME!"=="" (
 
 if "!SERVICE_NAME!"=="" set "SERVICE_NAME=OCR Service"
 
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd_HHmmss')"`) do set "SESSION_STAMP=%%i"
+if "!SESSION_STAMP!"=="" set "SESSION_STAMP=manual_%RANDOM%"
+set "SESSION_LOG_FILE=%LOG_DIR%\console_!SESSION_STAMP!_%RANDOM%.log"
+
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
 
 set "SERVICE_ALREADY_RUNNING="
-for /f "delims=" %%i in ('powershell -NoProfile -Command "try { $resp = Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:5005/info'; if ($resp.service -eq 'Generic LLM OCR') { 'running' } } catch {}"') do set "SERVICE_ALREADY_RUNNING=%%i"
+for /f "delims=" %%i in ('powershell -NoProfile -Command "try { $resp = Invoke-RestMethod -TimeoutSec 2 -Uri 'http://127.0.0.1:!SERVICE_PORT!/info'; if (($resp.service_name -eq '!SERVICE_NAME!') -or ($resp.service -eq '!SERVICE_NAME!')) { 'running' } } catch {}"') do set "SERVICE_ALREADY_RUNNING=%%i"
 
 if /i "!SERVICE_ALREADY_RUNNING!"=="running" (
-    echo !SERVICE_NAME! is already running on http://127.0.0.1:5005
+    echo !SERVICE_NAME! is already running on http://127.0.0.1:!SERVICE_PORT!
     echo Existing service detected at %date% %time% > "%SESSION_LOG_FILE%"
     echo Reused running service instead of starting a second instance. >> "%SESSION_LOG_FILE%"
     goto :eof

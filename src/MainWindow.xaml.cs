@@ -198,6 +198,7 @@ namespace UGTLive
         private System.Windows.Controls.RadioButton? overlayHideRadio => _toolbarWindow?.overlayHideRadio;
         private System.Windows.Controls.RadioButton? overlaySourceRadio => _toolbarWindow?.overlaySourceRadio;
         private System.Windows.Controls.RadioButton? overlayTranslatedRadio => _toolbarWindow?.overlayTranslatedRadio;
+        private System.Windows.Controls.CheckBox? ttsEnabledToolbarCheckBox => _toolbarWindow?.ttsEnabledCheckBox;
         private System.Windows.Controls.CheckBox? mousePassthroughCheckBox => _toolbarWindow?.mousePassthroughCheckBox;
         private System.Windows.Controls.CheckBox? genericLlmIgnoreMenusCheckBox => _toolbarWindow?.genericLlmIgnoreMenusCheckBox;
 
@@ -828,6 +829,9 @@ namespace UGTLive
             if (mousePassthroughCheckBox != null)
                 mousePassthroughCheckBox.ToolTip = $"Toggle mouse passthrough mode{GetHotkeyString("toggle_passthrough")}";
 
+            if (ttsEnabledToolbarCheckBox != null)
+                ttsEnabledToolbarCheckBox.ToolTip = "Enable or disable text-to-speech playback";
+
             if (genericLlmIgnoreMenusCheckBox != null)
                 genericLlmIgnoreMenusCheckBox.ToolTip = "Generic LLM OCR: ignore routine in-game menu or UI text and focus on dialogue or other important text";
             
@@ -853,6 +857,7 @@ namespace UGTLive
             { 
                 toggleButton, snapshotButton, monitorButton, chatBoxButton, settingsButton, logButton, 
                 listenButton, exportButton, hideButton, mousePassthroughCheckBox,
+                ttsEnabledToolbarCheckBox,
                 genericLlmIgnoreMenusCheckBox,
                 overlayHideRadio, overlaySourceRadio, overlayTranslatedRadio
             };
@@ -2749,9 +2754,20 @@ namespace UGTLive
 
         public void UpdateMonitorButtonState(bool isVisible)
         {
-            monitorButton.Background = isVisible
-                ? new SolidColorBrush(Color.FromRgb(46, 160, 67))
-                : new SolidColorBrush(Color.FromRgb(95, 95, 95));
+                if (_isShuttingDown)
+                {
+                    return;
+                }
+
+                var button = monitorButton;
+                if (button == null)
+                {
+                    return;
+                }
+
+                button.Background = isVisible
+                    ? new SolidColorBrush(Color.FromRgb(46, 160, 67))
+                    : new SolidColorBrush(Color.FromRgb(95, 95, 95));
         }
         
         // Initialize console window with proper encoding and font
@@ -5241,6 +5257,26 @@ namespace UGTLive
             Console.WriteLine($"Mouse passthrough {(isEnabled ? "enabled" : "disabled")}");
         }
 
+        public void HandleTtsEnabledChanged(bool isEnabled)
+        {
+            ConfigManager.Instance.SetTtsEnabled(isEnabled);
+
+            if (!isEnabled)
+            {
+                AudioPreloadService.Instance.CancelAllPreloads();
+                AudioPlaybackManager.Instance.StopCurrentPlayback();
+            }
+
+            _toolbarWindow?.SyncTtsEnabled(isEnabled);
+            if (SettingsWindow.IsOpenAndVisible())
+            {
+                SettingsWindow.Instance.SyncTtsEnabled(isEnabled);
+            }
+
+            BringToFront();
+            Console.WriteLine($"TTS {(isEnabled ? "enabled" : "disabled")}");
+        }
+
         public void HandleGenericLlmOcrIgnoreMenusChanged(bool isEnabled)
         {
             ConfigManager.Instance.SetGenericLlmOcrIgnoreMenuTextEnabled(isEnabled);
@@ -5593,7 +5629,7 @@ namespace UGTLive
                 
                 if (!string.IsNullOrWhiteSpace(textToSpeak))
                 {
-                    await TtsServiceFactory.CreateService().SpeakText(textToSpeak);
+                    await AudioPlaybackManager.Instance.SpeakTextAsync(textToSpeak, _currentOverlayMode != OverlayMode.Translated);
                 }
             }
         }
@@ -5608,7 +5644,7 @@ namespace UGTLive
                 
                 if (!string.IsNullOrWhiteSpace(textToSpeak))
                 {
-                    await TtsServiceFactory.CreateService().SpeakText(textToSpeak);
+                    await AudioPlaybackManager.Instance.SpeakTextAsync(textToSpeak, true);
                 }
             }
         }
@@ -5653,6 +5689,7 @@ namespace UGTLive
 
             CleanupDuplicateToolbars();
             UpdateToolbarPosition();
+            _toolbarWindow?.SyncTtsEnabled(ConfigManager.Instance.IsTtsEnabled());
             _toolbarWindow?.SyncGenericLlmIgnoreMenus(ConfigManager.Instance.IsGenericLlmOcrIgnoreMenuTextEnabled());
         }
 

@@ -178,6 +178,17 @@ namespace UGTLive
 
         private async Task<bool> SpeakTextInternalAsync(string text, string? voiceId, bool waitForCompletion, CancellationToken cancellationToken)
         {
+            IDisposable? gateLease = null;
+            if (IsLocalBackend())
+            {
+                gateLease = LocalTtsRequestGate.TryAcquire("Qwen3-TTS");
+                if (gateLease == null)
+                {
+                    Console.WriteLine("Qwen3-TTS: Ignoring synthesis request because the local service is already busy");
+                    return false;
+                }
+            }
+
             try
             {
                 Stopwatch speakStopwatch = Stopwatch.StartNew();
@@ -251,10 +262,25 @@ namespace UGTLive
                 Console.WriteLine($"Error initiating Qwen3-TTS: {ex.Message}");
                 return false;
             }
+            finally
+            {
+                gateLease?.Dispose();
+            }
         }
 
         public async Task<string?> GenerateAudioFileAsync(string text, string voiceId)
         {
+            IDisposable? gateLease = null;
+            if (IsLocalBackend())
+            {
+                gateLease = LocalTtsRequestGate.TryAcquire("Qwen3-TTS");
+                if (gateLease == null)
+                {
+                    Console.WriteLine("Qwen3-TTS: Ignoring audio generation request because the local service is already busy");
+                    return null;
+                }
+            }
+
             try
             {
                 if (string.IsNullOrWhiteSpace(text))
@@ -284,6 +310,10 @@ namespace UGTLive
             {
                 Console.WriteLine($"Error initiating Qwen3-TTS audio generation: {ex.Message}");
                 return null;
+            }
+            finally
+            {
+                gateLease?.Dispose();
             }
         }
 

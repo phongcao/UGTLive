@@ -107,6 +107,13 @@ namespace UGTLive
 
         private async Task<bool> SpeakTextInternalAsync(string text, string? voiceId, bool waitForCompletion, CancellationToken cancellationToken)
         {
+            IDisposable? gateLease = LocalTtsRequestGate.TryAcquire("VieNeu-TTS");
+            if (gateLease == null)
+            {
+                Debug.WriteLine("VieNeu-TTS: Ignoring synthesis request because the service is already busy");
+                return false;
+            }
+
             try
             {
                 Stopwatch speakStopwatch = Stopwatch.StartNew();
@@ -167,10 +174,21 @@ namespace UGTLive
                 Debug.WriteLine($"VieNeu-TTS error: {ex.Message}");
                 return false;
             }
+            finally
+            {
+                gateLease.Dispose();
+            }
         }
 
         public async Task<string?> GenerateAudioFileAsync(string text, string voiceId)
         {
+            IDisposable? gateLease = LocalTtsRequestGate.TryAcquire("VieNeu-TTS");
+            if (gateLease == null)
+            {
+                Debug.WriteLine("VieNeu-TTS: Ignoring audio generation request because the service is already busy");
+                return null;
+            }
+
             try
             {
                 if (string.IsNullOrWhiteSpace(text))
@@ -193,6 +211,10 @@ namespace UGTLive
             {
                 Debug.WriteLine($"VieNeu-TTS: Error generating audio: {ex.Message}");
                 return null;
+            }
+            finally
+            {
+                gateLease.Dispose();
             }
         }
 

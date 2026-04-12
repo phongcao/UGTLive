@@ -97,6 +97,22 @@ namespace UGTLive
 
             return _instance.IsVisible && _instance.WindowState != WindowState.Minimized;
         }
+
+        public void SyncTtsEnabled(bool enabled)
+        {
+            bool previousInitializing = _isInitializing;
+            _isInitializing = true;
+            ttsEnabledCheckBox.IsChecked = enabled;
+            _isInitializing = previousInitializing;
+        }
+
+        public void SyncDialogTtsEnabled(bool enabled)
+        {
+            bool previousInitializing = _isInitializing;
+            _isInitializing = true;
+            dialogTtsCheckBox.IsChecked = enabled;
+            _isInitializing = previousInitializing;
+        }
         
         public SettingsWindow()
         {
@@ -664,6 +680,8 @@ namespace UGTLive
             // Temporarily remove TTS event handlers
             ttsEnabledCheckBox.Checked -= TtsEnabledCheckBox_CheckedChanged;
             ttsEnabledCheckBox.Unchecked -= TtsEnabledCheckBox_CheckedChanged;
+            dialogTtsCheckBox.Checked -= DialogTtsCheckBox_CheckedChanged;
+            dialogTtsCheckBox.Unchecked -= DialogTtsCheckBox_CheckedChanged;
             ttsServiceComboBox.SelectionChanged -= TtsServiceComboBox_SelectionChanged;
             elevenLabsVoiceComboBox.SelectionChanged -= ElevenLabsVoiceComboBox_SelectionChanged;
             googleTtsVoiceComboBox.SelectionChanged -= GoogleTtsVoiceComboBox_SelectionChanged;
@@ -679,6 +697,7 @@ namespace UGTLive
             
             // Set TTS enabled state
             ttsEnabledCheckBox.IsChecked = ConfigManager.Instance.IsTtsEnabled();
+            dialogTtsCheckBox.IsChecked = ConfigManager.Instance.IsDialogTtsEnabled();
             
             // Set TTS service
             string ttsService = ConfigManager.Instance.GetTtsService();
@@ -753,6 +772,8 @@ namespace UGTLive
             // Re-attach TTS event handlers
             ttsEnabledCheckBox.Checked += TtsEnabledCheckBox_CheckedChanged;
             ttsEnabledCheckBox.Unchecked += TtsEnabledCheckBox_CheckedChanged;
+            dialogTtsCheckBox.Checked += DialogTtsCheckBox_CheckedChanged;
+            dialogTtsCheckBox.Unchecked += DialogTtsCheckBox_CheckedChanged;
             ttsServiceComboBox.SelectionChanged += TtsServiceComboBox_SelectionChanged;
             elevenLabsVoiceComboBox.SelectionChanged += ElevenLabsVoiceComboBox_SelectionChanged;
             googleTtsVoiceComboBox.SelectionChanged += GoogleTtsVoiceComboBox_SelectionChanged;
@@ -3478,12 +3499,42 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
                     return;
                     
                 bool isEnabled = ttsEnabledCheckBox.IsChecked ?? false;
-                ConfigManager.Instance.SetTtsEnabled(isEnabled);
-                Console.WriteLine($"TTS enabled: {isEnabled}");
+                MainWindow.Instance?.HandleTtsEnabledChanged(isEnabled);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating TTS enabled state: {ex.Message}");
+            }
+        }
+
+        private void DialogTtsCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isInitializing)
+                    return;
+
+                bool isEnabled = dialogTtsCheckBox.IsChecked ?? false;
+                ConfigManager.Instance.SetDialogTtsEnabled(isEnabled);
+                DialogTtsFilterService.Instance.ClearCache();
+
+                AudioPreloadService.Instance.CancelAllPreloads();
+                AudioPlaybackManager.Instance.StopCurrentPlayback();
+                AudioPreloadService.Instance.ClearAudioCache();
+
+                Logic.Instance.ResetHash();
+                Logic.Instance.ClearAllTextObjects();
+
+                if (MainWindow.Instance.GetIsStarted())
+                {
+                    MainWindow.Instance.SetOCRCheckIsWanted(true);
+                }
+
+                Console.WriteLine($"Dialog TTS enabled: {isEnabled}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating Dialog TTS state: {ex.Message}");
             }
         }
         

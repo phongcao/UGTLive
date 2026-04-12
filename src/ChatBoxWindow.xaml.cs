@@ -252,13 +252,7 @@ namespace UGTLive
                         
                         try
                         {
-                            bool success = await TtsServiceFactory.CreateService(ttsService).SpeakText(text);
-                            
-                            if (!success)
-                            {
-                                System.Windows.MessageBox.Show($"Failed to generate speech using {ttsService}. Please check the API key and settings.",
-                                    "Text-to-Speech Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                            }
+                            await AudioPlaybackManager.Instance.SpeakTextAsync(text);
                         }
                         finally
                         {

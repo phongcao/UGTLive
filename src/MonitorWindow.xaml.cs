@@ -2252,7 +2252,7 @@ namespace UGTLive
             }
         }
         
-        private void OverlayContextMenu_Speak_Click(object sender, RoutedEventArgs e)
+        private async void OverlayContextMenu_Speak_Click(object sender, RoutedEventArgs e)
         {
             TextObject? textObj = GetTextObjectById(_currentContextMenuTextObjectId);
             if (textObj != null)
@@ -2265,12 +2265,12 @@ namespace UGTLive
                 
                 if (!string.IsNullOrWhiteSpace(textToSpeak))
                 {
-                    _ = TtsServiceFactory.CreateService().SpeakText(textToSpeak);
+                    await AudioPlaybackManager.Instance.SpeakTextAsync(textToSpeak, _currentOverlayMode != OverlayMode.Translated);
                 }
             }
         }
         
-        private void OverlayContextMenu_SpeakSource_Click(object sender, RoutedEventArgs e)
+        private async void OverlayContextMenu_SpeakSource_Click(object sender, RoutedEventArgs e)
         {
             TextObject? textObj = GetTextObjectById(_currentContextMenuTextObjectId);
             if (textObj != null)
@@ -2280,7 +2280,7 @@ namespace UGTLive
                 
                 if (!string.IsNullOrWhiteSpace(textToSpeak))
                 {
-                    _ = TtsServiceFactory.CreateService().SpeakText(textToSpeak);
+                    await AudioPlaybackManager.Instance.SpeakTextAsync(textToSpeak, true);
                 }
             }
         }

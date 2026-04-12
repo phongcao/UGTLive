@@ -111,6 +111,11 @@
                     Click="PlayAllAudioButton_Click"
                     ToolTip="Play all audio files in order"/>
 
+            <CheckBox x:Name="ttsEnabledCheckBox" Content="TTS" Foreground="White"
+                      Margin="4,2" FontSize="11"
+                      ToolTip="Enable or disable text-to-speech playback"
+                      Checked="TtsEnabledCheckBox_Changed" Unchecked="TtsEnabledCheckBox_Changed"/>
+
             <!-- Passthrough -->
             <CheckBox x:Name="mousePassthroughCheckBox" Content="Passthrough" Foreground="White"
                       Margin="4,2" FontSize="11"

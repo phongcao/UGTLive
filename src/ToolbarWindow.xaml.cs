@@ -239,6 +239,12 @@ namespace UGTLive
             MainWindow.Instance?.HandlePassthroughChanged(mousePassthroughCheckBox.IsChecked ?? false);
         }
 
+        private void TtsEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!_isInitialized) return;
+            MainWindow.Instance?.HandleTtsEnabledChanged(ttsEnabledCheckBox.IsChecked ?? false);
+        }
+
         private void GenericLlmIgnoreMenusCheckBox_Changed(object sender, RoutedEventArgs e)
         {
             if (!_isInitialized) return;
@@ -269,6 +275,13 @@ namespace UGTLive
         {
             _isInitialized = false;
             mousePassthroughCheckBox.IsChecked = enabled;
+            _isInitialized = true;
+        }
+
+        public void SyncTtsEnabled(bool enabled)
+        {
+            _isInitialized = false;
+            ttsEnabledCheckBox.IsChecked = enabled;
             _isInitialized = true;
         }
 

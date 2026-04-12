@@ -169,6 +169,7 @@ namespace UGTLive
         
         // Text-to-Speech configuration keys
         public const string TTS_ENABLED = "tts_enabled";
+        public const string DIALOG_TTS_ENABLED = "dialog_tts_enabled";
         public const string TTS_SERVICE = "tts_service";
         public const string ELEVENLABS_API_KEY = "elevenlabs_api_key";
         public const string ELEVENLABS_VOICE = "elevenlabs_voice";
@@ -413,6 +414,7 @@ namespace UGTLive
                 bool changed = false;
                 changed |= applyDeprecatedModelMigrations();
                 changed |= ensureGenericLlmOcrConfigDefaults();
+                changed |= ensureTtsConfigDefaults();
                 changed |= ensureQwen3TtsConfigDefaults();
 
                 if (changed)
@@ -527,6 +529,19 @@ namespace UGTLive
 
             return changed;
         }
+
+        private bool ensureTtsConfigDefaults()
+        {
+            bool changed = false;
+
+            if (!_configValues.ContainsKey(DIALOG_TTS_ENABLED))
+            {
+                _configValues[DIALOG_TTS_ENABLED] = "false";
+                changed = true;
+            }
+
+            return changed;
+        }
         
         public bool GetGoogleTranslateUseCloudApi()
         {
@@ -593,6 +608,7 @@ namespace UGTLive
             _configValues[QWEN3_TTS_EXTERNAL_API_KEY] = "";
             _configValues[QWEN3_TTS_EXTERNAL_MODEL] = "";
             _configValues[TTS_ENABLED] = "false";
+            _configValues[DIALOG_TTS_ENABLED] = "false";
             
             // TTS Preload defaults (TTS_SOURCE_SERVICE and TTS_TARGET_SERVICE are intentionally
             // not set here so they fall through to GetTtsService() as the dynamic default)
@@ -1847,6 +1863,18 @@ Here is the input JSON:";
             _configValues[TTS_ENABLED] = enabled.ToString().ToLower();
             SaveConfig();
             Console.WriteLine($"TTS enabled: {enabled}");
+        }
+
+        public bool IsDialogTtsEnabled()
+        {
+            return GetBoolValue(DIALOG_TTS_ENABLED, false);
+        }
+
+        public void SetDialogTtsEnabled(bool enabled)
+        {
+            _configValues[DIALOG_TTS_ENABLED] = enabled.ToString().ToLower();
+            SaveConfig();
+            Console.WriteLine($"Dialog TTS enabled: {enabled}");
         }
 
         public bool IsTtsPlayingGlowEnabled()

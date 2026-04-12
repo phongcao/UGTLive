@@ -224,9 +224,9 @@ namespace UGTLive
                 Console.WriteLine($"AudioPreloadService: Using service={service}, voice={voice}");
             }
 
-            if (ShouldUseLocalQwenStreaming(service))
+            if (ShouldUseLocalStreaming(service))
             {
-                Console.WriteLine("AudioPreloadService: Skipping source audio file preload for local Qwen3-TTS; play-all/autoplay will use live streaming.");
+                Console.WriteLine($"AudioPreloadService: Skipping source audio file preload for local {service}; play-all/autoplay will use live streaming.");
                 CheckAndTriggerAutoPlay();
                 return;
             }
@@ -355,9 +355,9 @@ namespace UGTLive
                 Console.WriteLine($"AudioPreloadService: Using service={service}, voice={voice}");
             }
 
-            if (ShouldUseLocalQwenStreaming(service))
+            if (ShouldUseLocalStreaming(service))
             {
-                Console.WriteLine("AudioPreloadService: Skipping target audio file preload for local Qwen3-TTS; play-all/autoplay will use live streaming.");
+                Console.WriteLine($"AudioPreloadService: Skipping target audio file preload for local {service}; play-all/autoplay will use live streaming.");
                 CheckAndTriggerAutoPlay();
                 return;
             }
@@ -436,6 +436,21 @@ namespace UGTLive
                 {
                     return;
                 }
+
+                string? filteredText = await DialogTtsFilterService.Instance.FilterTextAsync(
+                    text,
+                    isSource ? ConfigManager.Instance.GetSourceLanguage() : ConfigManager.Instance.GetTargetLanguage(),
+                    cancellationToken);
+                if (string.IsNullOrWhiteSpace(filteredText) || ConfigManager.Instance.IsTextBelowTtsMinChars(filteredText))
+                {
+                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                    {
+                        Console.WriteLine($"AudioPreloadService: Skipping text object {textObj.ID} after Dialog TTS filtering");
+                    }
+                    return;
+                }
+
+                text = filteredText;
 
                 // Generate hash for caching
                 string textHash = ComputeTextHash(service, voice, text);
@@ -735,7 +750,7 @@ namespace UGTLive
                 return;
             }
 
-            if (ShouldUseLocalQwenStreamingForPreloadMode(preloadMode))
+            if (ShouldUseLocalStreamingForPreloadMode(preloadMode))
             {
                 Application.Current.Dispatcher.InvokeAsync(() =>
                 {
@@ -784,7 +799,7 @@ namespace UGTLive
             }
         }
 
-        private bool ShouldUseLocalQwenStreamingForPreloadMode(string preloadMode)
+        private bool ShouldUseLocalStreamingForPreloadMode(string preloadMode)
         {
             string? service = preloadMode switch
             {
@@ -796,12 +811,12 @@ namespace UGTLive
                 _ => null,
             };
 
-            return service != null && ShouldUseLocalQwenStreaming(service);
+            return service != null && ShouldUseLocalStreaming(service);
         }
 
-        private bool ShouldUseLocalQwenStreaming(string service)
+        private bool ShouldUseLocalStreaming(string service)
         {
-            return service == "Qwen3-TTS" && TtsServiceFactory.IsLocalService(service);
+            return TtsServiceFactory.IsLocalService(service);
         }
         
         public void CancelAllPreloads()

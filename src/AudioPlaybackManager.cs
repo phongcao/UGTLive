@@ -19,6 +19,8 @@ namespace UGTLive
         private bool _autoPlayTriggered = false;
         private CancellationTokenSource? _playbackCancellationToken;
         private readonly object _playbackLock = new object();
+        private readonly object _speechRequestLock = new object();
+        private int _activeSpeechRequests = 0;
         private string? _currentPlayingTextObjectId = null;
         
         // Event to notify when playback state changes
@@ -312,6 +314,82 @@ namespace UGTLive
                 OnPlayAllStateChanged(false);
             }
         }
+
+        public bool IsTtsBusy()
+        {
+            lock (_speechRequestLock)
+            {
+                if (_activeSpeechRequests > 0)
+                {
+                    return true;
+                }
+            }
+
+            lock (_playbackLock)
+            {
+                return _isPlaying || _isPlayingAll;
+            }
+        }
+
+        public async Task<bool> SpeakTextAsync(string text, bool? useSourceText = null, CancellationToken cancellationToken = default)
+        {
+            if (!ConfigManager.Instance.IsTtsEnabled())
+            {
+                Console.WriteLine("AudioPlaybackManager: Speech request skipped because TTS is disabled");
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            if (!TryBeginSpeechRequest())
+            {
+                Console.WriteLine("AudioPlaybackManager: Ignoring speech request because TTS is already busy");
+                return false;
+            }
+
+            try
+            {
+                string? filteredText = await DialogTtsFilterService.Instance.FilterTextAsync(
+                    text,
+                    GetLanguageHint(useSourceText),
+                    cancellationToken);
+
+                if (string.IsNullOrWhiteSpace(filteredText))
+                {
+                    Console.WriteLine("AudioPlaybackManager: Speech request skipped because Dialog TTS filtered out all speakable text");
+                    return false;
+                }
+
+                string serviceName = ConfigManager.Instance.GetTtsService();
+                if (TtsServiceFactory.IsLocalService(serviceName))
+                {
+                    AudioPreloadService.Instance.CancelAllPreloads();
+
+                    return serviceName == "VieNeu-TTS"
+                        ? await VieNeuTtsService.Instance.SpeakTextAndWaitAsync(
+                            filteredText,
+                            ConfigManager.Instance.GetVieNeuTtsVoice(),
+                            cancellationToken)
+                        : await Qwen3TtsService.Instance.SpeakTextAndWaitAsync(
+                            filteredText,
+                            ConfigManager.Instance.GetQwen3TtsVoice(),
+                            cancellationToken);
+                }
+
+                return await TtsServiceFactory.CreateService(serviceName).SpeakText(filteredText);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            finally
+            {
+                EndSpeechRequest();
+            }
+        }
         
         private void CleanupCurrentPlayback()
         {
@@ -430,6 +508,7 @@ namespace UGTLive
             List<TextObject> objectsToPlay;
             if (useLocalQwenStreaming)
             {
+                AudioPreloadService.Instance.CancelAllPreloads();
                 objectsToPlay = sortedObjects.Where(obj => TryGetStreamingTextForObject(obj, useSourceAudio, out _)).ToList();
                 Console.WriteLine($"PlayAllAudio: Using local {streamingServiceName} live streaming for {objectsToPlay.Count} text objects");
             }
@@ -489,6 +568,20 @@ namespace UGTLive
                         {
                             continue;
                         }
+
+                        string? filteredText = await DialogTtsFilterService.Instance.FilterTextAsync(
+                            textToSpeak,
+                            useSourceAudio ? ConfigManager.Instance.GetSourceLanguage() : ConfigManager.Instance.GetTargetLanguage(),
+                            cancellationToken);
+                        if (string.IsNullOrWhiteSpace(filteredText) || ConfigManager.Instance.IsTextBelowTtsMinChars(filteredText))
+                        {
+                            if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                            {
+                                Console.WriteLine($"PlayAllAudio: Skipping text object {textObj.ID} after Dialog TTS filtering");
+                            }
+                            continue;
+                        }
+                        textToSpeak = filteredText;
 
                         try
                         {
@@ -705,6 +798,48 @@ namespace UGTLive
             lock (_playbackLock)
             {
                 return _isPlayingAll;
+            }
+        }
+
+        private string? GetLanguageHint(bool? useSourceText)
+        {
+            if (!useSourceText.HasValue)
+            {
+                return null;
+            }
+
+            return useSourceText.Value
+                ? ConfigManager.Instance.GetSourceLanguage()
+                : ConfigManager.Instance.GetTargetLanguage();
+        }
+
+        private bool TryBeginSpeechRequest()
+        {
+            if (IsTtsBusy())
+            {
+                return false;
+            }
+
+            lock (_speechRequestLock)
+            {
+                if (_activeSpeechRequests > 0)
+                {
+                    return false;
+                }
+
+                _activeSpeechRequests++;
+                return true;
+            }
+        }
+
+        private void EndSpeechRequest()
+        {
+            lock (_speechRequestLock)
+            {
+                if (_activeSpeechRequests > 0)
+                {
+                    _activeSpeechRequests--;
+                }
             }
         }
         
