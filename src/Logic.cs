@@ -3183,6 +3183,16 @@ namespace UGTLive
                         }
                     }
 
+                    // Image change detection for non-streaming Generic LLM OCR
+                    if (ocrMethod == "Generic LLM OCR" && ShouldSkipGenericLlmOcrStreamingFrame(imageBytes))
+                    {
+                        ClearCurrentProcessingBitmap();
+                        MainWindow.Instance.SetOCRCheckIsWanted(true);
+                        NotifyOCRCompleted();
+                        OnFinishedThings(true, skipOverlayRefresh: true);
+                        return;
+                    }
+
                     if (bitmapClone == null)
                     {
                         bitmapClone = (System.Drawing.Bitmap)bitmap.Clone();

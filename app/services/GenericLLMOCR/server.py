@@ -197,6 +197,16 @@ STREAMING_BBOX_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_BBOX_IN_TEXT_RE = re.compile(
+    r"\s*\|?\s*BBOX:\s*\[[^\]]*\]\s*\|?\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_bbox_from_text(text: str) -> str:
+    """Remove residual BBOX: [...] markers (and surrounding pipes) from text."""
+    return _BBOX_IN_TEXT_RE.sub(" ", text).strip()
+
 
 def extract_translation_match_fields(match: re.Match) -> Tuple[str, str, str]:
     raw_bbox = (match.group("bbox_first") or match.group("bbox_after_text") or "").strip()
@@ -206,7 +216,11 @@ def extract_translation_match_fields(match: re.Match) -> Tuple[str, str, str]:
         or match.group("translated_before_bbox")
         or ""
     )
-    return raw_bbox, llm_text.replace("</s>", "").strip(), translated_text.replace("</s>", "").strip()
+    return (
+        raw_bbox,
+        _strip_bbox_from_text(llm_text.replace("</s>", "").strip()),
+        _strip_bbox_from_text(translated_text.replace("</s>", "").strip()),
+    )
 
 
 def split_completed_response_lines(buffer: str) -> Tuple[List[str], str]:
@@ -921,6 +935,7 @@ def process_partial_streaming_text_object(
     text_marker_match = re.search(r"\|\s*TEXT:\s*", stripped_line, re.IGNORECASE)
     if text_marker_match is not None:
         text_value = stripped_line[text_marker_match.end():].replace("</s>", "").strip()
+        text_value = _strip_bbox_from_text(text_value)
         if is_no_text_response(text_value):
             return None
 
