@@ -64,6 +64,23 @@ namespace UGTLive
         private const uint MONITOR_DEFAULTTONEAREST = 2;
         private const int MDT_EFFECTIVE_DPI = 0;
         
+        // For targeted window capture (PrintWindow + BitBlt)
+        [DllImport("user32.dll")]
+        private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+        
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsDelegate lpEnumFunc, IntPtr lParam);
+        
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        
+        private delegate bool EnumWindowsDelegate(IntPtr hWnd, IntPtr lParam);
+        
+        private const uint PW_RENDERFULLCONTENT = 2; // Captures window content even if occluded
+
         // For keeping window on top via Win32 (more reliable than WPF Topmost for transparent windows)
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -132,6 +149,11 @@ namespace UGTLive
 
         // Separate top-level overlay window (excluded from screen capture via WDA_EXCLUDEFROMCAPTURE)
         private OverlayWindow? _overlayWindow;
+        
+        // Targeted window capture: cached handle and title
+        private IntPtr _targetWindowHandle = IntPtr.Zero;
+        private string _targetWindowTitleCached = "";
+        private bool _logTargetCaptureOnce = true; // One-shot debug flag for target capture
         
         // Translation status timer and tracking
         private DispatcherTimer? _translationStatusTimer;
@@ -1263,62 +1285,105 @@ namespace UGTLive
             previousCaptureX = captureRect.Left;
             previousCaptureY = captureRect.Top;
 
-            // The capture area matches the old OverlayContent margin: Left=15, Top=50, Right=15, Bottom=15 (in DIPs).
-            // These are the same values that were in MainWindow.xaml for the OverlayContent grid.
-            const double OVERLAY_MARGIN_LEFT = 15.0;
-            const double OVERLAY_MARGIN_TOP = 50.0;
-            const double OVERLAY_MARGIN_RIGHT = 15.0;
-            const double OVERLAY_MARGIN_BOTTOM = 15.0;
-
-            try
+            // TARGET WINDOW CAPTURE MODE
+            // When a target window is configured (e.g. a game like PAL4), captureRect must be
+            // based on the target window's visible bounds instead of the MainWindow. This ensures:
+            //   1. The capture bitmap covers the full target window content.
+            //   2. The overlay window is positioned over the target window (not the MainWindow).
+            //   3. OCR bounding-box coordinates (relative to the captured bitmap) map 1:1 to
+            //      overlay CSS positions, so translated text appears at the correct location.
+            // Without this, captureRect would reflect the MainWindow's content area, causing
+            // a coordinate mismatch between the captured image and the overlay.
+            bool usedTargetWindow = false;
+            IntPtr targetHwnd = GetTargetWindowHandle();
+            if (targetHwnd != IntPtr.Zero)
             {
-                // Get actual visible window bounds using DWM API (excludes extended frame/shadows)
-                RECT windowRect;
-                int result = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out windowRect, 
-                    System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
-                
-                if (result != 0)
+                try
                 {
-                    GetWindowRect(hwnd, out windowRect);
-                }
-                
-                double actualDpiScale = GetActualDpiScale();
-                double virtualizedDpiScale = GetVirtualizedDpiScale();
-                double dpiCorrectionFactor = actualDpiScale / virtualizedDpiScale;
-                
-                // Convert WPF DIP margins to actual physical pixels
-                int offsetX = (int)(OVERLAY_MARGIN_LEFT * virtualizedDpiScale * dpiCorrectionFactor);
-                int offsetY = (int)(OVERLAY_MARGIN_TOP * virtualizedDpiScale * dpiCorrectionFactor);
-                int marginRight = (int)(OVERLAY_MARGIN_RIGHT * virtualizedDpiScale * dpiCorrectionFactor);
-                int marginBottom = (int)(OVERLAY_MARGIN_BOTTOM * virtualizedDpiScale * dpiCorrectionFactor);
-                
-                int captureWidth = windowRect.Width - offsetX - marginRight;
-                int captureHeight = windowRect.Height - offsetY - marginBottom;
-                
-                int captureLeft = windowRect.Left + offsetX;
-                int captureTop = windowRect.Top + offsetY;
-                
-                if (_logCaptureRectOnce && ConfigManager.Instance.GetLogExtraDebugStuff())
-                {
-                    _logCaptureRectOnce = false;
-                    double textScale = GetWindowsTextScaleFactor();
-                    Console.WriteLine($"[DEBUG] Window rect: L={windowRect.Left}, T={windowRect.Top}, W={windowRect.Width}, H={windowRect.Height}");
-                    Console.WriteLine($"[DEBUG] Overlay margins (DIPs): L={OVERLAY_MARGIN_LEFT}, T={OVERLAY_MARGIN_TOP}, R={OVERLAY_MARGIN_RIGHT}, B={OVERLAY_MARGIN_BOTTOM}");
-                    Console.WriteLine($"[DEBUG] Actual DPI: {actualDpiScale}, Virtualized DPI: {virtualizedDpiScale}, Correction: {dpiCorrectionFactor:F3}");
-                    Console.WriteLine($"[DEBUG] Text scale: {textScale}");
-                    Console.WriteLine($"[DEBUG] Calculated offset: X={offsetX}, Y={offsetY}");
-                    Console.WriteLine($"[DEBUG] Capture rect: L={captureLeft}, T={captureTop}, {captureWidth}x{captureHeight}");
-                }
+                    RECT targetRect;
+                    int tResult = DwmGetWindowAttribute(targetHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out targetRect,
+                        System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
+                    if (tResult != 0)
+                        GetWindowRect(targetHwnd, out targetRect);
 
-                if (captureWidth > 0 && captureHeight > 0)
+                    if (targetRect.Width > 0 && targetRect.Height > 0)
+                    {
+                        captureRect = new System.Drawing.Rectangle(
+                            targetRect.Left, targetRect.Top, targetRect.Width, targetRect.Height);
+                        usedTargetWindow = true;
+
+                        if (_logCaptureRectOnce && ConfigManager.Instance.GetLogExtraDebugStuff())
+                        {
+                            _logCaptureRectOnce = false;
+                            Console.WriteLine($"[DEBUG] Target window capture rect: L={targetRect.Left}, T={targetRect.Top}, {targetRect.Width}x{targetRect.Height}");
+                        }
+                    }
+                }
+                catch (Exception ex)
                 {
-                    captureRect = new System.Drawing.Rectangle(captureLeft, captureTop, captureWidth, captureHeight);
+                    Console.WriteLine($"[UpdateCaptureRect] Target window rect failed: {ex.Message}");
                 }
             }
-            catch (Exception ex)
+
+            if (!usedTargetWindow)
             {
-                Console.WriteLine($"[UpdateCaptureRect] Coordinate calculation failed: {ex.Message}");
-                UpdateCaptureRectFallback(hwnd);
+                // The capture area matches the old OverlayContent margin: Left=15, Top=50, Right=15, Bottom=15 (in DIPs).
+                // These are the same values that were in MainWindow.xaml for the OverlayContent grid.
+                const double OVERLAY_MARGIN_LEFT = 15.0;
+                const double OVERLAY_MARGIN_TOP = 50.0;
+                const double OVERLAY_MARGIN_RIGHT = 15.0;
+                const double OVERLAY_MARGIN_BOTTOM = 15.0;
+
+                try
+                {
+                    // Get actual visible window bounds using DWM API (excludes extended frame/shadows)
+                    RECT windowRect;
+                    int result = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out windowRect, 
+                        System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
+                    
+                    if (result != 0)
+                    {
+                        GetWindowRect(hwnd, out windowRect);
+                    }
+                    
+                    double actualDpiScale = GetActualDpiScale();
+                    double virtualizedDpiScale = GetVirtualizedDpiScale();
+                    double dpiCorrectionFactor = actualDpiScale / virtualizedDpiScale;
+                    
+                    // Convert WPF DIP margins to actual physical pixels
+                    int offsetX = (int)(OVERLAY_MARGIN_LEFT * virtualizedDpiScale * dpiCorrectionFactor);
+                    int offsetY = (int)(OVERLAY_MARGIN_TOP * virtualizedDpiScale * dpiCorrectionFactor);
+                    int marginRight = (int)(OVERLAY_MARGIN_RIGHT * virtualizedDpiScale * dpiCorrectionFactor);
+                    int marginBottom = (int)(OVERLAY_MARGIN_BOTTOM * virtualizedDpiScale * dpiCorrectionFactor);
+                    
+                    int captureWidth = windowRect.Width - offsetX - marginRight;
+                    int captureHeight = windowRect.Height - offsetY - marginBottom;
+                    
+                    int captureLeft = windowRect.Left + offsetX;
+                    int captureTop = windowRect.Top + offsetY;
+                    
+                    if (_logCaptureRectOnce && ConfigManager.Instance.GetLogExtraDebugStuff())
+                    {
+                        _logCaptureRectOnce = false;
+                        double textScale = GetWindowsTextScaleFactor();
+                        Console.WriteLine($"[DEBUG] Window rect: L={windowRect.Left}, T={windowRect.Top}, W={windowRect.Width}, H={windowRect.Height}");
+                        Console.WriteLine($"[DEBUG] Overlay margins (DIPs): L={OVERLAY_MARGIN_LEFT}, T={OVERLAY_MARGIN_TOP}, R={OVERLAY_MARGIN_RIGHT}, B={OVERLAY_MARGIN_BOTTOM}");
+                        Console.WriteLine($"[DEBUG] Actual DPI: {actualDpiScale}, Virtualized DPI: {virtualizedDpiScale}, Correction: {dpiCorrectionFactor:F3}");
+                        Console.WriteLine($"[DEBUG] Text scale: {textScale}");
+                        Console.WriteLine($"[DEBUG] Calculated offset: X={offsetX}, Y={offsetY}");
+                        Console.WriteLine($"[DEBUG] Capture rect: L={captureLeft}, T={captureTop}, {captureWidth}x{captureHeight}");
+                    }
+
+                    if (captureWidth > 0 && captureHeight > 0)
+                    {
+                        captureRect = new System.Drawing.Rectangle(captureLeft, captureTop, captureWidth, captureHeight);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[UpdateCaptureRect] Coordinate calculation failed: {ex.Message}");
+                    UpdateCaptureRectFallback(hwnd);
+                }
             }
                 
             // If position changed and we have text objects, update their positions
@@ -2258,6 +2323,17 @@ namespace UGTLive
             // Update the capture rectangle to ensure correct dimensions
             UpdateCaptureRect();
 
+            // In target window mode, keep the overlay positioned over the target window.
+            // SyncOverlayWindowPosition only fires on MainWindow move/resize, so we must
+            // update the overlay here each capture cycle to track the target window.
+            if (_targetWindowHandle != IntPtr.Zero && _overlayWindow != null
+                && captureRect.Width > 0 && captureRect.Height > 0)
+            {
+                _overlayWindow.UpdatePosition(
+                    captureRect.Left, captureRect.Top,
+                    captureRect.Width, captureRect.Height);
+            }
+
             //if capture rect is less than 1 pixel, don't capture
             if (captureRect.Width < 1 || captureRect.Height < 1) return;
 
@@ -2286,6 +2362,14 @@ namespace UGTLive
                 
                 // Store the current capture coordinates for use with OCR results
                 Logic.Instance.SetCurrentCapturePosition(captureRect.Left, captureRect.Top);
+
+                // When running under a debugger (Visual Studio), save capture screenshots
+                // to the debug folder for diagnosing target-window capture and overlay positioning.
+                // Keeps a rolling window of MAX_DEBUG_CAPTURES images to avoid filling disk.
+                if (_targetWindowHandle != IntPtr.Zero && Debugger.IsAttached)
+                {
+                    SaveTargetCaptureDebugImage(bitmap);
+                }
 
                 try
                 {
@@ -2373,6 +2457,18 @@ namespace UGTLive
 
         private bool TryCopyCaptureRectToBitmap(Bitmap bitmap, bool suppressMainWindowOverlay, string errorContext)
         {
+            // If a target window is configured, try to capture it directly with PrintWindow.
+            // This avoids needing to hide the overlay at all.
+            IntPtr targetHwnd = GetTargetWindowHandle();
+            if (targetHwnd != IntPtr.Zero)
+            {
+                if (TryCaptureTargetWindow(bitmap, targetHwnd, errorContext))
+                {
+                    return true;
+                }
+                // PrintWindow failed — fall through to normal screen capture
+            }
+
             // The overlay is now a separate top-level window.
             // Only hide it when the caller actually needs a clean capture (for OCR).
             // The suppressMainWindowOverlay flag indicates this need.
@@ -2414,6 +2510,277 @@ namespace UGTLive
                 {
                     _overlayWindow!.ShowAfterCapture();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Find a window by partial title match. Returns IntPtr.Zero if not found.
+        /// Picks the best candidate: on-screen windows with the largest area win.
+        /// </summary>
+        private IntPtr FindWindowByTitle(string partialTitle)
+        {
+            IntPtr bestHwnd = IntPtr.Zero;
+            long bestArea = 0;
+            bool bestIsOnScreen = false;
+
+            EnumWindows((hWnd, lParam) =>
+            {
+                if (!IsWindowVisible(hWnd)) return true;
+                
+                StringBuilder sb = new StringBuilder(256);
+                GetWindowText(hWnd, sb, 256);
+                string title = sb.ToString();
+                
+                if (string.IsNullOrEmpty(title) || 
+                    title.IndexOf(partialTitle, StringComparison.OrdinalIgnoreCase) < 0)
+                    return true;
+
+                // Skip our own windows
+                IntPtr mainHwnd = helper.Handle;
+                if (hWnd == mainHwnd) return true;
+                if (_overlayWindow != null)
+                {
+                    IntPtr overlayHwnd = new WindowInteropHelper(_overlayWindow).Handle;
+                    if (hWnd == overlayHwnd) return true;
+                }
+                
+                // Get window rect to evaluate quality of this candidate
+                RECT rect;
+                GetWindowRect(hWnd, out rect);
+                long area = (long)rect.Width * rect.Height;
+                bool isOnScreen = rect.Left > -10000 && rect.Top > -10000;
+
+                // Prefer on-screen windows; among same category prefer largest
+                if ((!bestIsOnScreen && isOnScreen) || 
+                    (isOnScreen == bestIsOnScreen && area > bestArea))
+                {
+                    bestHwnd = hWnd;
+                    bestArea = area;
+                    bestIsOnScreen = isOnScreen;
+                }
+                
+                return true; // continue to check all matches
+            }, IntPtr.Zero);
+            
+            return bestHwnd;
+        }
+
+        /// <summary>
+        /// Get the cached target window handle, refreshing if the title config changed or the handle is stale.
+        /// </summary>
+        private IntPtr GetTargetWindowHandle()
+        {
+            string configTitle = ConfigManager.Instance.GetTargetWindowTitle();
+            if (string.IsNullOrWhiteSpace(configTitle))
+            {
+                _targetWindowHandle = IntPtr.Zero;
+                _targetWindowTitleCached = "";
+                return IntPtr.Zero;
+            }
+            
+            // Re-lookup if config changed or handle might be stale
+            if (_targetWindowTitleCached != configTitle || _targetWindowHandle == IntPtr.Zero ||
+                !IsWindowVisible(_targetWindowHandle))
+            {
+                _targetWindowHandle = FindWindowByTitle(configTitle);
+                _targetWindowTitleCached = configTitle;
+                _logTargetCaptureOnce = true; // Reset so we log debug info for the new target
+                
+                if (_targetWindowHandle == IntPtr.Zero)
+                {
+                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                    {
+                        Console.WriteLine($"[TargetCapture] Window not found for title: '{configTitle}'");
+                    }
+                }
+                else if (ConfigManager.Instance.GetLogExtraDebugStuff())
+                {
+                    StringBuilder sb = new StringBuilder(256);
+                    GetWindowText(_targetWindowHandle, sb, 256);
+                    Console.WriteLine($"[TargetCapture] Found target window: '{sb}' (handle=0x{_targetWindowHandle:X})");
+                }
+            }
+            
+            return _targetWindowHandle;
+        }
+
+        /// <summary>
+        /// Maximum number of debug capture images to keep in the rolling buffer.
+        /// Older images are deleted when this limit is exceeded.
+        /// </summary>
+        private const int MAX_DEBUG_CAPTURES = 10;
+        private readonly Queue<string> _debugCapturePaths = new Queue<string>();
+
+        /// <summary>
+        /// Save a target-window capture screenshot to app/debug/ for diagnostic purposes.
+        /// Only called when Debugger.IsAttached. Maintains a rolling window of MAX_DEBUG_CAPTURES
+        /// images, deleting the oldest when the limit is exceeded.
+        /// </summary>
+        private void SaveTargetCaptureDebugImage(Bitmap bitmap)
+        {
+            try
+            {
+                string debugDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "debug");
+                Directory.CreateDirectory(debugDir);
+
+                string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+                string debugPath = Path.Combine(debugDir,
+                    $"capture_{timestamp}_{captureRect.Left}x{captureRect.Top}_{bitmap.Width}x{bitmap.Height}.png");
+                bitmap.Save(debugPath, ImageFormat.Png);
+                _debugCapturePaths.Enqueue(debugPath);
+
+                // Remove oldest captures beyond the limit
+                while (_debugCapturePaths.Count > MAX_DEBUG_CAPTURES)
+                {
+                    string oldPath = _debugCapturePaths.Dequeue();
+                    try { File.Delete(oldPath); }
+                    catch { /* best effort cleanup */ }
+                }
+
+                Console.WriteLine($"[TargetCapture] Debug image saved ({_debugCapturePaths.Count}/{MAX_DEBUG_CAPTURES}): {debugPath}");
+                Console.WriteLine($"[TargetCapture] captureRect: L={captureRect.Left} T={captureRect.Top} {captureRect.Width}x{captureRect.Height}");
+                if (_overlayWindow != null)
+                    Console.WriteLine($"[TargetCapture] overlay pos: L={_overlayWindow.Left:F0} T={_overlayWindow.Top:F0} W={_overlayWindow.Width:F0} H={_overlayWindow.Height:F0}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TargetCapture] Debug image save failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Capture a specific window's content using PrintWindow, then crop to the capture rect.
+        /// This avoids capturing any overlays on top of the target window.
+        /// 
+        /// DPI SCALING HANDLING:
+        /// DPI-unaware apps (e.g. older games like PAL4) report 96 DPI while our per-monitor-aware
+        /// process sees the real monitor DPI (e.g. 192 for 200% scaling). GetWindowRect returns
+        /// physical screen pixels (because we are DPI-aware), but PrintWindow renders at the
+        /// target's native DPI — so the rendered content is smaller than GetWindowRect dimensions
+        /// by the ratio (targetDpi / ourDpi). Without compensation, the game content renders in
+        /// the top-left corner of the bitmap with the rest being black.
+        /// 
+        /// To handle this, we:
+        ///   1. Detect the DPI ratio between the target window and our process.
+        ///   2. Allocate the PrintWindow bitmap at the native (smaller) size so it fills completely.
+        ///   3. Crop at native-scaled coordinates.
+        ///   4. Scale up via DrawImage with bilinear interpolation to fill the output bitmap at
+        ///      physical screen resolution, matching captureRect dimensions.
+        /// </summary>
+        private bool TryCaptureTargetWindow(Bitmap bitmap, IntPtr targetHwnd, string errorContext)
+        {
+            try
+            {
+                // PrintWindow renders the full window at GetWindowRect dimensions.
+                RECT gwrRect;
+                GetWindowRect(targetHwnd, out gwrRect);
+
+                // Safety: if the window is offscreen (minimized, hidden helper, etc.), skip
+                if (gwrRect.Left < -10000 || gwrRect.Top < -10000)
+                {
+                    return false;
+                }
+
+                int bmpW = gwrRect.Width;
+                int bmpH = gwrRect.Height;
+                if (bmpW <= 0 || bmpH <= 0) return false;
+
+                // Detect DPI mismatch: DPI-unaware apps report 96 DPI while our
+                // DPI-aware process sees the actual monitor DPI (e.g. 192 for 200%).
+                // GetWindowRect returns physical screen pixels (because we are DPI-aware),
+                // but PrintWindow renders at the target's native DPI — so the rendered
+                // content is smaller than the bitmap by the ratio targetDpi/ourDpi.
+                uint targetDpi = GetDpiForWindow(targetHwnd);
+                uint ourDpi = GetDpiForWindow(helper.Handle);
+                double nativeScale = (ourDpi > 0 && targetDpi > 0) ? (double)targetDpi / ourDpi : 1.0;
+                bool hasDpiMismatch = nativeScale < 0.999;
+
+                // Crop offset: capture rect origin minus target window GWR origin.
+                // Both are in physical screen pixels.
+                int srcX = captureRect.Left - gwrRect.Left;
+                int srcY = captureRect.Top - gwrRect.Top;
+                int srcW = captureRect.Width;
+                int srcH = captureRect.Height;
+
+                // For DPI-mismatched targets, compute native (unscaled) crop coordinates.
+                int nativeBmpW = hasDpiMismatch ? Math.Max(1, (int)Math.Round(bmpW * nativeScale)) : bmpW;
+                int nativeBmpH = hasDpiMismatch ? Math.Max(1, (int)Math.Round(bmpH * nativeScale)) : bmpH;
+                int nativeSrcX = hasDpiMismatch ? (int)Math.Round(srcX * nativeScale) : srcX;
+                int nativeSrcY = hasDpiMismatch ? (int)Math.Round(srcY * nativeScale) : srcY;
+                int nativeSrcW = hasDpiMismatch ? Math.Max(1, (int)Math.Round(srcW * nativeScale)) : srcW;
+                int nativeSrcH = hasDpiMismatch ? Math.Max(1, (int)Math.Round(srcH * nativeScale)) : srcH;
+
+                // One-shot detailed debug log
+                if (_logTargetCaptureOnce)
+                {
+                    _logTargetCaptureOnce = false;
+                    RECT dwmRect;
+                    int dwmResult = DwmGetWindowAttribute(targetHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out dwmRect,
+                        System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
+                    Console.WriteLine($"[TargetCapture] === FIRST CAPTURE DEBUG INFO ===");
+                    Console.WriteLine($"[TargetCapture] GetWindowRect(target):  L={gwrRect.Left} T={gwrRect.Top} R={gwrRect.Right} B={gwrRect.Bottom} ({gwrRect.Width}x{gwrRect.Height})");
+                    if (dwmResult == 0)
+                        Console.WriteLine($"[TargetCapture] DWM ExtFrameBounds(target): L={dwmRect.Left} T={dwmRect.Top} R={dwmRect.Right} B={dwmRect.Bottom} ({dwmRect.Width}x{dwmRect.Height})");
+                    Console.WriteLine($"[TargetCapture] captureRect (phys px):  L={captureRect.Left} T={captureRect.Top} {captureRect.Width}x{captureRect.Height}");
+                    Console.WriteLine($"[TargetCapture] Target DPI={targetDpi} Our DPI={ourDpi} nativeScale={nativeScale:F3} hasDpiMismatch={hasDpiMismatch}");
+                    Console.WriteLine($"[TargetCapture] Physical crop: X={srcX} Y={srcY} {srcW}x{srcH} (GWR bitmap {bmpW}x{bmpH})");
+                    Console.WriteLine($"[TargetCapture] Native crop:   X={nativeSrcX} Y={nativeSrcY} {nativeSrcW}x{nativeSrcH} (native bitmap {nativeBmpW}x{nativeBmpH})");
+                    Console.WriteLine($"[TargetCapture] Output bitmap:          {bitmap.Width}x{bitmap.Height}");
+                    Console.WriteLine($"[TargetCapture] === END DEBUG INFO ===");
+                }
+
+                // Validate crop bounds against the native bitmap dimensions
+                if (nativeSrcX < 0 || nativeSrcY < 0 ||
+                    nativeSrcX + nativeSrcW > nativeBmpW || nativeSrcY + nativeSrcH > nativeBmpH)
+                {
+                    Console.WriteLine($"[TargetCapture] Native crop ({nativeSrcX},{nativeSrcY}) {nativeSrcW}x{nativeSrcH} exceeds native bitmap {nativeBmpW}x{nativeBmpH} — falling back to screen capture");
+                    return false;
+                }
+
+                // Capture the target window into a temporary bitmap.
+                // For DPI-mismatched targets, use the native render size so PrintWindow
+                // fills the bitmap exactly instead of leaving black borders.
+                int pwBitmapW = hasDpiMismatch ? nativeBmpW : bmpW;
+                int pwBitmapH = hasDpiMismatch ? nativeBmpH : bmpH;
+
+                using (Bitmap windowBitmap = new Bitmap(pwBitmapW, pwBitmapH))
+                {
+                    using (Graphics g = Graphics.FromImage(windowBitmap))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        bool success = PrintWindow(targetHwnd, hdc, PW_RENDERFULLCONTENT);
+                        g.ReleaseHdc(hdc);
+
+                        if (!success)
+                        {
+                            Console.WriteLine($"[TargetCapture] PrintWindow failed for {errorContext}, falling back to screen capture");
+                            return false;
+                        }
+                    }
+
+                    // Copy (and scale up if DPI-mismatched) from the PrintWindow bitmap
+                    // to the output bitmap so it matches the physical screen resolution.
+                    using (Graphics g = Graphics.FromImage(bitmap))
+                    {
+                        g.CompositingQuality = CompositingQuality.HighSpeed;
+                        g.InterpolationMode = hasDpiMismatch
+                            ? InterpolationMode.HighQualityBilinear
+                            : InterpolationMode.NearestNeighbor;
+                        g.PixelOffsetMode = PixelOffsetMode.None;
+
+                        g.DrawImage(windowBitmap,
+                            new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                            new System.Drawing.Rectangle(nativeSrcX, nativeSrcY, nativeSrcW, nativeSrcH),
+                            GraphicsUnit.Pixel);
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TargetCapture] Error during {errorContext}: {ex.Message}");
+                return false;
             }
         }
 

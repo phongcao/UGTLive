@@ -269,6 +269,9 @@ namespace UGTLive
         public const string MAIN_WINDOW_MOUSE_PASSTHROUGH = "main_window_mouse_passthrough";
         public const string WINDOWS_VISIBLE_IN_SCREENSHOTS = "windows_visible_in_screenshots";
 
+        // Target window capture (capture a specific window by title instead of screen region)
+        public const string TARGET_WINDOW_TITLE = "target_window_title";
+
         // Floating toolbar position (offset from main window's top-right corner)
         public const string TOOLBAR_OFFSET_X = "toolbar_offset_x";
         public const string TOOLBAR_OFFSET_Y = "toolbar_offset_y";
@@ -3607,6 +3610,23 @@ Here is the input JSON:";
             _configValues[WINDOWS_VISIBLE_IN_SCREENSHOTS] = visible.ToString().ToLower();
             SaveConfig();
             Console.WriteLine($"Windows visible in screenshots set to: {visible}");
+        }
+
+        /// <summary>
+        /// Get the target window title for direct window capture.
+        /// When set, PrintWindow is used to capture that window instead of CopyFromScreen.
+        /// Empty string means disabled (use normal screen capture).
+        /// </summary>
+        public string GetTargetWindowTitle()
+        {
+            return GetValue(TARGET_WINDOW_TITLE, "");
+        }
+
+        public void SetTargetWindowTitle(string title)
+        {
+            _configValues[TARGET_WINDOW_TITLE] = title ?? "";
+            SaveConfig();
+            Console.WriteLine($"Target window title set to: '{title}'");
         }
 
         // Check if persist window size is enabled

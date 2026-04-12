@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -23,6 +25,26 @@ namespace UGTLive
 
         private const uint WDA_NONE = 0x00000000;
         private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+        // For enumerating windows to populate the target window dropdown
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        
+        [DllImport("user32.dll")]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        private const string DEFAULT_CAPTURE_ITEM = "Screen capture (default)";
 
         public static ToolbarWindow? Instance { get; private set; }
 
@@ -59,6 +81,7 @@ namespace UGTLive
 
         private void ToolbarWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            SyncTargetWindow();
             _isInitialized = true;
         }
 
@@ -136,7 +159,8 @@ namespace UGTLive
             {
                 if (element is System.Windows.Controls.Button ||
                     element is System.Windows.Controls.CheckBox ||
-                    element is System.Windows.Controls.RadioButton)
+                    element is System.Windows.Controls.RadioButton ||
+                    element is System.Windows.Controls.ComboBox)
                     return true;
                 element = System.Windows.Media.VisualTreeHelper.GetParent(element);
             }
@@ -249,6 +273,127 @@ namespace UGTLive
         {
             if (!_isInitialized) return;
             MainWindow.Instance?.HandleGenericLlmOcrIgnoreMenusChanged(genericLlmIgnoreMenusCheckBox.IsChecked ?? false);
+        }
+
+        // --- Target window capture dropdown ---
+
+        /// <summary>
+        /// Get a list of visible top-level window titles, excluding our own windows.
+        /// </summary>
+        private List<string> GetVisibleWindowTitles()
+        {
+            var titles = new List<string>();
+            uint ownPid = 0;
+            try
+            {
+                ownPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            }
+            catch { }
+
+            EnumWindows((hWnd, lParam) =>
+            {
+                if (!IsWindowVisible(hWnd)) return true;
+                int len = GetWindowTextLength(hWnd);
+                if (len == 0) return true;
+                
+                // Skip our own process windows
+                if (ownPid != 0)
+                {
+                    GetWindowThreadProcessId(hWnd, out uint windowPid);
+                    if (windowPid == ownPid) return true;
+                }
+
+                StringBuilder sb = new StringBuilder(len + 1);
+                GetWindowText(hWnd, sb, sb.Capacity);
+                string title = sb.ToString();
+                if (!string.IsNullOrWhiteSpace(title))
+                {
+                    titles.Add(title);
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            titles.Sort(StringComparer.OrdinalIgnoreCase);
+            return titles;
+        }
+
+        private void TargetWindowComboBox_DropDownOpened(object sender, EventArgs e)
+        {
+            // Remember current selection
+            string currentConfig = ConfigManager.Instance.GetTargetWindowTitle();
+            
+            _isInitialized = false;
+            targetWindowComboBox.Items.Clear();
+            targetWindowComboBox.Items.Add(DEFAULT_CAPTURE_ITEM);
+
+            var titles = GetVisibleWindowTitles();
+            foreach (var title in titles)
+            {
+                targetWindowComboBox.Items.Add(title);
+            }
+
+            // Restore selection
+            if (string.IsNullOrEmpty(currentConfig))
+            {
+                targetWindowComboBox.SelectedIndex = 0;
+            }
+            else
+            {
+                bool found = false;
+                for (int i = 1; i < targetWindowComboBox.Items.Count; i++)
+                {
+                    string item = targetWindowComboBox.Items[i] as string ?? "";
+                    if (item.IndexOf(currentConfig, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        targetWindowComboBox.SelectedIndex = i;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    // The previously configured window is no longer visible; keep default
+                    targetWindowComboBox.SelectedIndex = 0;
+                }
+            }
+            _isInitialized = true;
+        }
+
+        private void TargetWindowComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_isInitialized) return;
+            
+            string selected = targetWindowComboBox.SelectedItem as string ?? "";
+            if (selected == DEFAULT_CAPTURE_ITEM || string.IsNullOrEmpty(selected))
+            {
+                ConfigManager.Instance.SetTargetWindowTitle("");
+            }
+            else
+            {
+                ConfigManager.Instance.SetTargetWindowTitle(selected);
+            }
+        }
+
+        /// <summary>
+        /// Initialize the target window combo box from saved config.
+        /// </summary>
+        public void SyncTargetWindow()
+        {
+            _isInitialized = false;
+            targetWindowComboBox.Items.Clear();
+            targetWindowComboBox.Items.Add(DEFAULT_CAPTURE_ITEM);
+
+            string configTitle = ConfigManager.Instance.GetTargetWindowTitle();
+            if (string.IsNullOrEmpty(configTitle))
+            {
+                targetWindowComboBox.SelectedIndex = 0;
+            }
+            else
+            {
+                targetWindowComboBox.Items.Add(configTitle);
+                targetWindowComboBox.SelectedIndex = 1;
+            }
+            _isInitialized = true;
         }
 
         // --- Sync state from MainWindow ---
