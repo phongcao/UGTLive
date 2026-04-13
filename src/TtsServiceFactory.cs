@@ -17,6 +17,7 @@ namespace UGTLive
                 "Google Cloud TTS" => GoogleTTSService.Instance,
                 "Qwen3-TTS" => Qwen3TtsService.Instance,
                 "VieNeu-TTS" => VieNeuTtsService.Instance,
+                "VieNeu-GGUF-TTS" => VieNeuGgufTtsService.Instance,
                 _ => ElevenLabsService.Instance
             };
 
@@ -26,6 +27,8 @@ namespace UGTLive
         public static bool IsLocalService(string serviceName)
         {
             if (serviceName == "VieNeu-TTS")
+                return true;
+            if (serviceName == "VieNeu-GGUF-TTS")
                 return true;
             return serviceName == "Qwen3-TTS" && ConfigManager.Instance.IsQwen3TtsLocalBackend();
         }

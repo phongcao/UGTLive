@@ -196,6 +196,13 @@ namespace UGTLive
         public const string VIENEU_TTS_PORT = "vieneu_tts_port";
         public const string VIENEU_TTS_VOICE = "vieneu_tts_voice";
         
+        // VieNeu-GGUF-TTS configuration keys
+        public const string VIENEU_GGUF_TTS_URL = "vieneu_gguf_tts_url";
+        public const string VIENEU_GGUF_TTS_PORT = "vieneu_gguf_tts_port";
+        public const string VIENEU_GGUF_TTS_VOICE = "vieneu_gguf_tts_voice";
+        public const string VIENEU_GGUF_TTS_LM_STUDIO_URL = "vieneu_gguf_tts_lm_studio_url";
+        public const string VIENEU_GGUF_TTS_MODEL = "vieneu_gguf_tts_model";
+        
         // TTS Preload configuration keys
         public const string TTS_SOURCE_SERVICE = "tts_source_service";
         public const string TTS_SOURCE_VOICE = "tts_source_voice";
@@ -2152,6 +2159,40 @@ Here is the input JSON:";
             Console.WriteLine($"VieNeu-TTS voice set to: {voice}");
         }
         
+        // VieNeu-GGUF-TTS methods
+
+        public string GetVieNeuGgufTtsUrl()
+        {
+            return GetValue(VIENEU_GGUF_TTS_URL, "http://127.0.0.1");
+        }
+
+        public string GetVieNeuGgufTtsPort()
+        {
+            return GetValue(VIENEU_GGUF_TTS_PORT, "5008");
+        }
+
+        public string GetVieNeuGgufTtsVoice()
+        {
+            return GetValue(VIENEU_GGUF_TTS_VOICE, "Xuân Vĩnh (Nam - Miền Nam)");
+        }
+
+        public string GetVieNeuGgufTtsLmStudioUrl()
+        {
+            return GetValue(VIENEU_GGUF_TTS_LM_STUDIO_URL, "http://127.0.0.1:1234");
+        }
+
+        public string GetVieNeuGgufTtsModel()
+        {
+            return GetValue(VIENEU_GGUF_TTS_MODEL, "");
+        }
+
+        public void SetVieNeuGgufTtsVoice(string voice)
+        {
+            _configValues[VIENEU_GGUF_TTS_VOICE] = voice ?? "";
+            SaveConfig();
+            Console.WriteLine($"VieNeu-GGUF-TTS voice set to: {voice}");
+        }
+        
         private void migratePageReadingTtsDefaults()
         {
             // If the user never explicitly chose a Page Reading TTS service, the config file
@@ -2300,6 +2341,7 @@ Here is the input JSON:";
                 "Qwen3-TTS" => GetQwen3TtsVoice(),
                 "Google Cloud TTS" => GetGoogleTtsVoice(),
                 "VieNeu-TTS" => GetVieNeuTtsVoice(),
+                "VieNeu-GGUF-TTS" => GetVieNeuGgufTtsVoice(),
                 _ => GetElevenLabsVoice()
             };
         }

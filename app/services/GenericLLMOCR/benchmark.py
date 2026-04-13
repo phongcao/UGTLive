@@ -414,12 +414,14 @@ def benchmark_tts(
     texts: List[str],
     config: Dict[str, str],
     iterations: int = 1,
+    tts_service_override: Optional[str] = None,
+    save_audio: bool = False,
 ) -> float:
     """
     Send text to the configured TTS service and measure response time.
     Returns avg_time_seconds for synthesizing all texts.
     """
-    tts_service = config.get("tts_service", "").strip()
+    tts_service = (tts_service_override or config.get("tts_service", "")).strip()
 
     if "qwen" in tts_service.lower() or "qwen3" in tts_service.lower():
         port = int(config.get("qwen3_tts_port", "5004"))
@@ -433,6 +435,15 @@ def benchmark_tts(
                 "text": text, "voice": voice, "language": "Auto", "fast_mode": fast_mode,
             }, timeout=120)
 
+    elif "vieneugguf" in tts_service.lower().replace("-", ""):
+        port = int(config.get("vieneu_gguf_tts_port", "5008"))
+        voice = config.get("vieneu_gguf_tts_voice", "Default")
+        url = f"http://127.0.0.1:{port}/tts"
+        service_label = f"VieNeuGGUFTTS (port={port}, voice={voice})"
+
+        def make_request(text: str) -> requests.Response:
+            return requests.post(url, json={"text": text, "voice_id": voice}, timeout=120)
+
     elif "vieneu" in tts_service.lower():
         port = int(config.get("vieneu_tts_port", "5007"))
         voice = config.get("vieneu_tts_voice", "Default")
@@ -444,7 +455,7 @@ def benchmark_tts(
 
     else:
         print(f"  SKIP: TTS service '{tts_service}' not supported by this harness.")
-        print("  Supported: Qwen3-TTS, VieNeu-TTS")
+        print("  Supported: Qwen3-TTS, VieNeu-TTS, VieNeuGGUF-TTS")
         return 0.0
 
     print(f"  TTS service: {service_label}")
@@ -466,6 +477,14 @@ def benchmark_tts(
             print(f"  [{i+1}/{iterations}] TTS[{j}]  {elapsed*1000:8.1f} ms  "
                   f"audio_bytes={audio_bytes}  ~{duration_est:.1f}s audio  "
                   f"text={text[:60]}{'...' if len(text) > 60 else ''}")
+
+            if save_audio:
+                DEBUG_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                audio_path = DEBUG_IMAGE_DIR / f"benchmark_tts_{timestamp}_{j}.wav"
+                audio_path.write_bytes(resp.content)
+                print(f"    Audio saved to {audio_path}")
+
         iter_total = time.perf_counter() - iter_start
         times.append(iter_total)
 
@@ -544,6 +563,10 @@ def main():
     parser.add_argument("--source-lang", type=str, default=None, help="Source language (default: from config)")
     parser.add_argument("--target-lang", type=str, default=None, help="Target language (default: from config)")
     parser.add_argument("--tts-text", type=str, default=None, help="Override TTS text (instead of using OCR output)")
+    parser.add_argument("--tts-service", type=str, default=None,
+                        help="Override TTS service (Qwen3-TTS, VieNeu-TTS, VieNeuGGUF-TTS)")
+    parser.add_argument("--debug", action="store_true", default=False,
+                        help="Save audio and log files to debug folder")
     args = parser.parse_args()
 
     # Capture all output to save as a log file
@@ -706,14 +729,14 @@ def main():
         if not tts_texts:
             tts_texts = ["This is a test sentence for text to speech benchmarking."]
 
-        avg = benchmark_tts(tts_texts, config, args.iterations)
+        avg = benchmark_tts(tts_texts, config, args.iterations, args.tts_service, save_audio=args.debug)
         results["TTS"] = avg * 1000
         print()
 
     print_summary(results)
 
-    # Save full output to debug folder
-    save_benchmark_log(log_capture, sorted(stages))
+    if args.debug:
+        save_benchmark_log(log_capture, sorted(stages))
 
 
 class TeeWriter:

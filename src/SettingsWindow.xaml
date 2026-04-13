@@ -1275,6 +1275,7 @@
                                     <ComboBoxItem Content="Google Cloud TTS"/>
                                     <ComboBoxItem Content="Qwen3-TTS"/>
                                     <ComboBoxItem Content="VieNeu-TTS"/>
+                                    <ComboBoxItem Content="VieNeu-GGUF-TTS"/>
                                 </ComboBox>
                                 
                                 <!-- ElevenLabs API Key - Only visible when ElevenLabs is selected -->
@@ -1408,6 +1409,17 @@
                                           VerticalAlignment="Center" Margin="0,5,10,0" Visibility="Collapsed"/>
                                 <ComboBox x:Name="vieneuTtsVoiceComboBox" Grid.Row="5" Grid.Column="1" 
                                          Margin="0,5" SelectionChanged="VieNeuTtsVoiceComboBox_SelectionChanged" Visibility="Collapsed">
+                                    <ComboBoxItem Content="Xuân Vĩnh (Nam - Miền Nam)" Tag="Xuân Vĩnh (Nam - Miền Nam)"/>
+                                    <ComboBoxItem Content="Bích Ngọc (Nữ - Miền Bắc)" Tag="Bích Ngọc (Nữ - Miền Bắc)"/>
+                                    <ComboBoxItem Content="Phạm Tuyên (Nam - Miền Bắc)" Tag="Phạm Tuyên (Nam - Miền Bắc)"/>
+                                    <ComboBoxItem Content="Thục Đoan (Nữ - Miền Nam)" Tag="Thục Đoan (Nữ - Miền Nam)"/>
+                                </ComboBox>
+                                
+                                <!-- VieNeu-GGUF-TTS Voice - Only visible when VieNeu-GGUF-TTS is selected -->
+                                <TextBlock x:Name="vieneuGgufTtsVoiceLabel" Text="VieNeu-GGUF-TTS Voice:" Grid.Row="6" Grid.Column="0" 
+                                          VerticalAlignment="Center" Margin="0,5,10,0" Visibility="Collapsed"/>
+                                <ComboBox x:Name="vieneuGgufTtsVoiceComboBox" Grid.Row="6" Grid.Column="1" 
+                                         Margin="0,5" SelectionChanged="VieNeuGgufTtsVoiceComboBox_SelectionChanged" Visibility="Collapsed">
                                     <ComboBoxItem Content="Xuân Vĩnh (Nam - Miền Nam)" Tag="Xuân Vĩnh (Nam - Miền Nam)"/>
                                     <ComboBoxItem Content="Bích Ngọc (Nữ - Miền Bắc)" Tag="Bích Ngọc (Nữ - Miền Bắc)"/>
                                     <ComboBoxItem Content="Phạm Tuyên (Nam - Miền Bắc)" Tag="Phạm Tuyên (Nam - Miền Bắc)"/>

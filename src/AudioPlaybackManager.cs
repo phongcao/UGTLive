@@ -299,6 +299,7 @@ namespace UGTLive
 
             Qwen3TtsService.Instance.StopActivePlayback();
             VieNeuTtsService.Instance.StopActivePlayback();
+            VieNeuGgufTtsService.Instance.StopActivePlayback();
             
             // Update current playing ID and transition state
             // This avoids race condition when switching between playing audio files
@@ -372,6 +373,11 @@ namespace UGTLive
                         ? await VieNeuTtsService.Instance.SpeakTextAndWaitAsync(
                             filteredText,
                             ConfigManager.Instance.GetVieNeuTtsVoice(),
+                            cancellationToken)
+                        : serviceName == "VieNeu-GGUF-TTS"
+                        ? await VieNeuGgufTtsService.Instance.SpeakTextAndWaitAsync(
+                            filteredText,
+                            ConfigManager.Instance.GetVieNeuGgufTtsVoice(),
                             cancellationToken)
                         : await Qwen3TtsService.Instance.SpeakTextAndWaitAsync(
                             filteredText,
@@ -601,6 +607,10 @@ namespace UGTLive
                             {
                                 success = await VieNeuTtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
                             }
+                            else if (streamingServiceName == "VieNeu-GGUF-TTS")
+                            {
+                                success = await VieNeuGgufTtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
+                            }
                             else
                             {
                                 success = await Qwen3TtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
@@ -736,6 +746,11 @@ namespace UGTLive
             }
 
             if (service == "VieNeu-TTS")
+            {
+                return true;
+            }
+
+            if (service == "VieNeu-GGUF-TTS")
             {
                 return true;
             }
