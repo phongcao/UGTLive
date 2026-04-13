@@ -2749,7 +2749,13 @@ namespace UGTLive
                         else if (eventType == "stream_end")
                         {
                             double processingTime = root.TryGetProperty("processing_time", out var ptEl) ? ptEl.GetDouble() : 0;
-                            Log($"Streaming OCR complete: {streamedTextData.Count} text objects in {processingTime:F1}s");
+                            bool textUnchanged = root.TryGetProperty("text_unchanged", out var tuEl) && tuEl.GetBoolean();
+                            Log($"Streaming OCR complete: {streamedTextData.Count} text objects in {processingTime:F1}s text_unchanged={textUnchanged}");
+                            if (textUnchanged)
+                            {
+                                ClearStreamingPreviewOverlays();
+                                return true;
+                            }
                         }
                         else if (eventType == "error")
                         {

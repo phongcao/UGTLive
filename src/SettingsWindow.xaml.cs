@@ -1141,6 +1141,43 @@ namespace UGTLive
                 RefreshAfterGenericLlmOcrSettingChange();
             }
         }
+
+        private void GenericLlmOcrFuzzyMatchCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            bool isEnabled = genericLlmOcrFuzzyMatchCheckBox.IsChecked ?? true;
+            ConfigManager.Instance.SetGenericLlmOcrFuzzyMatchEnabled(isEnabled);
+
+            // Show/hide the threshold control based on the checkbox state
+            if (genericLlmOcrFuzzyThresholdLabel != null)
+                genericLlmOcrFuzzyThresholdLabel.Visibility = isEnabled ? Visibility.Visible : Visibility.Collapsed;
+            if (genericLlmOcrFuzzyThresholdTextBox != null)
+                genericLlmOcrFuzzyThresholdTextBox.Visibility = isEnabled ? Visibility.Visible : Visibility.Collapsed;
+
+            RefreshAfterGenericLlmOcrSettingChange();
+        }
+
+        private void GenericLlmOcrFuzzyThresholdTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            string raw = genericLlmOcrFuzzyThresholdTextBox.Text.Trim();
+            if (double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double value))
+            {
+                value = Math.Max(0.0, Math.Min(1.0, value));
+                string clamped = value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                genericLlmOcrFuzzyThresholdTextBox.Text = clamped;
+                ConfigManager.Instance.SetGenericLlmOcrFuzzyThreshold(clamped);
+                RefreshAfterGenericLlmOcrSettingChange();
+            }
+            else
+            {
+                genericLlmOcrFuzzyThresholdTextBox.Text = ConfigManager.Instance.GetGenericLlmOcrFuzzyThreshold();
+            }
+        }
         
         private void AutoTranslateCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
         {
@@ -1399,6 +1436,18 @@ namespace UGTLive
                             }
                         }
                         genericLlmOcrModeComboBox.SelectionChanged += GenericLlmOcrModeComboBox_SelectionChanged;
+                    }
+                    if (genericLlmOcrFuzzyMatchCheckBox != null)
+                    {
+                        bool fuzzyEnabled = ConfigManager.Instance.IsGenericLlmOcrFuzzyMatchEnabled();
+                        genericLlmOcrFuzzyMatchCheckBox.IsChecked = fuzzyEnabled;
+                        if (genericLlmOcrFuzzyThresholdLabel != null)
+                            genericLlmOcrFuzzyThresholdLabel.Visibility = fuzzyEnabled ? Visibility.Visible : Visibility.Collapsed;
+                        if (genericLlmOcrFuzzyThresholdTextBox != null)
+                        {
+                            genericLlmOcrFuzzyThresholdTextBox.Visibility = fuzzyEnabled ? Visibility.Visible : Visibility.Collapsed;
+                            genericLlmOcrFuzzyThresholdTextBox.Text = ConfigManager.Instance.GetGenericLlmOcrFuzzyThreshold();
+                        }
                     }
                 }
 

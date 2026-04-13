@@ -12,6 +12,7 @@ import sys
 import time
 import traceback
 import unicodedata
+from difflib import SequenceMatcher
 from io import BytesIO
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -65,6 +66,8 @@ DEFAULT_MODEL = "qwen2.5-vl-7b-instruct"
 DEFAULT_MODE = "OCR + Translate"
 DEFAULT_TARGET_LANGUAGE = "en"
 DEFAULT_IGNORE_MENU_TEXT = False
+DEFAULT_FUZZY_MATCH = True
+DEFAULT_FUZZY_THRESHOLD = 0.85
 DEFAULT_MAX_IMAGE_DIMENSION = 768
 DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000
 NO_TEXT_SENTINEL = "__UGTLIVE_NO_TEXT__"
@@ -310,6 +313,10 @@ OCR_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
 _LLM_SESSION = requests.Session()
 _LLM_SESSION.headers.update({"Content-Type": "application/json"})
 
+# Cache for fuzzy match deduplication (sync + streaming share the same cache)
+_last_combined_text: str = ""
+_last_text_objects: List[Dict] = []
+
 
 try:
     RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
@@ -373,6 +380,73 @@ def is_ignore_menu_text_enabled(runtime_config: Dict[str, str]) -> bool:
         str(DEFAULT_IGNORE_MENU_TEXT).lower(),
     )
     return (value or "").strip().lower() == "true"
+
+
+def is_fuzzy_match_enabled(runtime_config: Dict[str, str]) -> bool:
+    value = runtime_config.get(
+        "generic_llm_ocr_fuzzy_match",
+        str(DEFAULT_FUZZY_MATCH).lower(),
+    )
+    return (value or "").strip().lower() == "true"
+
+
+def get_fuzzy_threshold(runtime_config: Dict[str, str]) -> float:
+    raw = (runtime_config.get("generic_llm_ocr_fuzzy_threshold", "") or "").strip()
+    if not raw:
+        return DEFAULT_FUZZY_THRESHOLD
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        LOGGER.warning("Invalid generic_llm_ocr_fuzzy_threshold: %s. Using %.2f.", raw, DEFAULT_FUZZY_THRESHOLD)
+        return DEFAULT_FUZZY_THRESHOLD
+
+
+def combine_text_for_comparison(text_objects: List[Dict]) -> str:
+    """Build a single string from all text objects for fuzzy comparison."""
+    return "\n".join(obj.get("translated_text") or obj.get("text", "") for obj in text_objects)
+
+
+def check_fuzzy_unchanged(
+    text_objects: List[Dict],
+    runtime_config: Dict[str, str],
+) -> bool:
+    """Return True if *text_objects* are fuzzy-similar to the cached previous result.
+
+    When True the caller should treat the content as unchanged.
+    The cache is updated only when the content is considered *different*.
+    """
+    global _last_combined_text, _last_text_objects
+
+    if not is_fuzzy_match_enabled(runtime_config):
+        return False
+
+    combined = combine_text_for_comparison(text_objects)
+
+    # Nothing cached yet – store and report "changed"
+    if not _last_combined_text:
+        _last_combined_text = combined
+        _last_text_objects = text_objects
+        return False
+
+    threshold = get_fuzzy_threshold(runtime_config)
+    ratio = SequenceMatcher(None, _last_combined_text, combined).ratio()
+
+    LOGGER.info(
+        "Fuzzy match ratio=%.4f threshold=%.2f cached_len=%d new_len=%d",
+        ratio,
+        threshold,
+        len(_last_combined_text),
+        len(combined),
+    )
+
+    if ratio >= threshold:
+        # Similar enough – keep the cached version, don't update
+        return True
+
+    # Different – update cache
+    _last_combined_text = combined
+    _last_text_objects = text_objects
+    return False
 
 
 def build_endpoint(api_base: str) -> str:
@@ -808,6 +882,13 @@ def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -
                 obj["translated_text"] = trans
         t_post = time.time()
 
+    # Fuzzy match: if the new text is similar enough to the last result, return cached objects
+    text_unchanged = False
+    if text_objects and check_fuzzy_unchanged(text_objects, runtime_config):
+        LOGGER.info("Fuzzy match: text considered unchanged, returning cached text objects")
+        text_objects = _last_text_objects
+        text_unchanged = True
+
     LOGGER.info(
         "Timing: image_prep=%.1fms llm_call=%.1fms post_process=%.1fms total=%.1fms response_chars=%s",
         (t_prep - t0) * 1000.0,
@@ -827,6 +908,7 @@ def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -
         "mode": mode,
         "model": model,
         "includes_translations": any("translated_text" in text_obj for text_obj in text_objects),
+        "text_unchanged": text_unchanged,
         "raw_response": raw_response,
     }
 
@@ -1049,6 +1131,7 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
 
     emitted_count = 0
+    emitted_text_objects: List[Dict] = []
     pending_line = ""
     last_preview_signature: Optional[Tuple[int, int, int, int, str]] = None
 
@@ -1086,6 +1169,7 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
                 if text_obj is not None:
                     event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
                     yield f"data: {_json.dumps(event_data)}\n\n"
+                    emitted_text_objects.append(text_obj)
                     emitted_count += 1
                 last_preview_signature = None
 
@@ -1131,7 +1215,14 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
         if text_obj is not None:
             event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
             yield f"data: {_json.dumps(event_data)}\n\n"
+            emitted_text_objects.append(text_obj)
             emitted_count += 1
+
+    # Fuzzy match: check if the streamed text is essentially the same as the last result
+    text_unchanged = False
+    if emitted_text_objects and check_fuzzy_unchanged(emitted_text_objects, runtime_config):
+        LOGGER.info("Streaming fuzzy match: text considered unchanged")
+        text_unchanged = True
 
     # Final event
     done_data = {
@@ -1139,6 +1230,7 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
         "processing_time": time.time() - start_time,
         "total_text_objects": emitted_count,
         "includes_translations": mode == MODE_OCR_TRANSLATE,
+        "text_unchanged": text_unchanged,
     }
     yield f"data: {_json.dumps(done_data)}\n\n"
 

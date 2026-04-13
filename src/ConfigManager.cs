@@ -61,6 +61,8 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_IGNORE_MENU_TEXT = "generic_llm_ocr_ignore_menu_text";
         public const string GENERIC_LLM_OCR_STREAMING = "generic_llm_ocr_streaming";
         public const string GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES = "generic_llm_ocr_detect_image_changes";
+        public const string GENERIC_LLM_OCR_FUZZY_MATCH = "generic_llm_ocr_fuzzy_match";
+        public const string GENERIC_LLM_OCR_FUZZY_THRESHOLD = "generic_llm_ocr_fuzzy_threshold";
         
         // Per-OCR glue settings (for EasyOCR, MangaOCR, docTR, Windows OCR, Google Vision)
         // Format: horizontal_glue_<ocrmethod>, vertical_glue_<ocrmethod>, keep_linefeeds_<ocrmethod>, leave_translation_onscreen_<ocrmethod>
@@ -499,6 +501,18 @@ namespace UGTLive
                 changed = true;
             }
 
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_FUZZY_MATCH))
+            {
+                _configValues[GENERIC_LLM_OCR_FUZZY_MATCH] = "true";
+                changed = true;
+            }
+
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_FUZZY_THRESHOLD))
+            {
+                _configValues[GENERIC_LLM_OCR_FUZZY_THRESHOLD] = "0.85";
+                changed = true;
+            }
+
             return changed;
         }
 
@@ -643,6 +657,8 @@ namespace UGTLive
             _configValues[GENERIC_LLM_OCR_MODE] = "OCR + Translate";
             _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = "en";
             _configValues[GENERIC_LLM_OCR_IGNORE_MENU_TEXT] = "false";
+            _configValues[GENERIC_LLM_OCR_FUZZY_MATCH] = "true";
+            _configValues[GENERIC_LLM_OCR_FUZZY_THRESHOLD] = "0.85";
             _configValues[BLOCK_DETECTION_SCALE] = "3.00";
             _configValues[BLOCK_DETECTION_SETTLE_TIME] = "0.15";
             _configValues[BLOCK_DETECTION_MAX_SETTLE_TIME] = "1.00";
@@ -1156,6 +1172,28 @@ namespace UGTLive
         {
             string value = GetValue(GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES, "true");
             return value.ToLower() == "true";
+        }
+
+        public bool IsGenericLlmOcrFuzzyMatchEnabled()
+        {
+            return GetBoolValue(GENERIC_LLM_OCR_FUZZY_MATCH, true);
+        }
+
+        public void SetGenericLlmOcrFuzzyMatchEnabled(bool enabled)
+        {
+            _configValues[GENERIC_LLM_OCR_FUZZY_MATCH] = enabled.ToString().ToLowerInvariant();
+            SaveConfig();
+        }
+
+        public string GetGenericLlmOcrFuzzyThreshold()
+        {
+            return GetValue(GENERIC_LLM_OCR_FUZZY_THRESHOLD, "0.85");
+        }
+
+        public void SetGenericLlmOcrFuzzyThreshold(string threshold)
+        {
+            _configValues[GENERIC_LLM_OCR_FUZZY_THRESHOLD] = threshold;
+            SaveConfig();
         }
         
         

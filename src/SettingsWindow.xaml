@@ -264,6 +264,8 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto"/>
@@ -293,6 +295,18 @@
                                         <ComboBoxItem Content="OCR Only"/>
                                         <ComboBoxItem Content="OCR Then Translate"/>
                                     </ComboBox>
+
+                                    <TextBlock Text="Fuzzy match filter:" Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Margin="0,4,8,0"/>
+                                    <CheckBox x:Name="genericLlmOcrFuzzyMatchCheckBox" Grid.Row="4" Grid.Column="1"
+                                              Margin="0,4,0,0"
+                                              Checked="GenericLlmOcrFuzzyMatchCheckBox_CheckedChanged"
+                                              Unchecked="GenericLlmOcrFuzzyMatchCheckBox_CheckedChanged"
+                                              ToolTip="When enabled, suppresses re-rendering when the LLM produces slightly different translations for the same source text across frames"/>
+
+                                    <TextBlock x:Name="genericLlmOcrFuzzyThresholdLabel" Text="Fuzzy threshold:" Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBox x:Name="genericLlmOcrFuzzyThresholdTextBox" Grid.Row="5" Grid.Column="1"
+                                             Margin="0,0,0,6" LostFocus="GenericLlmOcrFuzzyThresholdTextBox_LostFocus"
+                                             ToolTip="Similarity threshold (0.0–1.0). Higher values require closer matches to suppress re-rendering. Default: 0.85"/>
                                 </Grid>
                                 
                                 <!-- Pause OCR While Translating -->
