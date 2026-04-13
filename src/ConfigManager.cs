@@ -172,6 +172,9 @@ namespace UGTLive
         // Text-to-Speech configuration keys
         public const string TTS_ENABLED = "tts_enabled";
         public const string DIALOG_TTS_ENABLED = "dialog_tts_enabled";
+        public const string DIALOG_TTS_API_BASE = "dialog_tts_api_base";
+        public const string DIALOG_TTS_API_KEY = "dialog_tts_api_key";
+        public const string DIALOG_TTS_MODEL = "dialog_tts_model";
         public const string TTS_SERVICE = "tts_service";
         public const string ELEVENLABS_API_KEY = "elevenlabs_api_key";
         public const string ELEVENLABS_VOICE = "elevenlabs_voice";
@@ -1922,6 +1925,39 @@ Here is the input JSON:";
             _configValues[DIALOG_TTS_ENABLED] = enabled.ToString().ToLower();
             SaveConfig();
             Console.WriteLine($"Dialog TTS enabled: {enabled}");
+        }
+
+        public string GetDialogTtsApiBase()
+        {
+            return GetValue(DIALOG_TTS_API_BASE, "");
+        }
+
+        public void SetDialogTtsApiBase(string apiBase)
+        {
+            _configValues[DIALOG_TTS_API_BASE] = apiBase?.Trim() ?? "";
+            SaveConfig();
+        }
+
+        public string GetDialogTtsApiKey()
+        {
+            return GetValue(DIALOG_TTS_API_KEY, "");
+        }
+
+        public void SetDialogTtsApiKey(string apiKey)
+        {
+            _configValues[DIALOG_TTS_API_KEY] = apiKey?.Trim() ?? "";
+            SaveConfig();
+        }
+
+        public string GetDialogTtsModel()
+        {
+            return GetValue(DIALOG_TTS_MODEL, "");
+        }
+
+        public void SetDialogTtsModel(string model)
+        {
+            _configValues[DIALOG_TTS_MODEL] = model?.Trim() ?? "";
+            SaveConfig();
         }
 
         public bool IsTtsPlayingGlowEnabled()

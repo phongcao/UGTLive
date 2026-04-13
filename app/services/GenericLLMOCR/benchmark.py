@@ -326,9 +326,9 @@ def benchmark_dialog_filter(
         print("  SKIP: No texts to filter.")
         return [], 0.0
 
-    api_base = config.get("generic_llm_ocr_api_base", "http://127.0.0.1:1234")
-    api_key = config.get("generic_llm_ocr_api_key", "")
-    model = config.get("generic_llm_ocr_model", "qwen2.5-vl-7b-instruct")
+    api_base = config.get("dialog_tts_api_base", "").strip() or config.get("generic_llm_ocr_api_base", "http://127.0.0.1:1234")
+    api_key = config.get("dialog_tts_api_key", "").strip() or config.get("generic_llm_ocr_api_key", "")
+    model = config.get("dialog_tts_model", "").strip() or config.get("generic_llm_ocr_model", "qwen2.5-vl-7b-instruct")
 
     endpoint = api_base.rstrip("/")
     if not endpoint.endswith("/chat/completions"):

@@ -1228,14 +1228,43 @@
                                          Unchecked="TtsEnabledCheckBox_CheckedChanged"/>
 
                                 <TextBlock Text="Dialog TTS:" Grid.Row="1" Grid.Column="0"
-                                          VerticalAlignment="Center" Margin="0,0,10,0"
-                                          ToolTip="Filter text through the Generic LLM OCR endpoint and keep only actual spoken dialogue or narration for TTS."/>
-                                <CheckBox x:Name="dialogTtsCheckBox" Grid.Row="1" Grid.Column="1"
-                                         Margin="0,5" IsChecked="False"
-                                         Content="Keep only spoken dialogue for TTS"
-                                         ToolTip="Uses the same OpenAI-compatible endpoint, API key, and model configured for Generic LLM OCR. Menu labels, UI text, and speaker names are stripped before TTS."
-                                         Checked="DialogTtsCheckBox_CheckedChanged"
-                                         Unchecked="DialogTtsCheckBox_CheckedChanged"/>
+                                          VerticalAlignment="Top" Margin="0,5,10,0"
+                                          ToolTip="Filter text through an LLM endpoint and keep only actual spoken dialogue or narration for TTS."/>
+                                <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,0">
+                                    <CheckBox x:Name="dialogTtsCheckBox"
+                                             Margin="0,5" IsChecked="False"
+                                             Content="Keep only spoken dialogue for TTS"
+                                             ToolTip="If no override endpoint is set below, falls back to the Generic LLM OCR endpoint, API key, and model. Menu labels, UI text, and speaker names are stripped before TTS."
+                                             Checked="DialogTtsCheckBox_CheckedChanged"
+                                             Unchecked="DialogTtsCheckBox_CheckedChanged"/>
+                                    <StackPanel x:Name="dialogTtsLlmSettingsPanel" Margin="0,2,0,5" Visibility="Collapsed">
+                                        <TextBlock Text="Override LLM endpoint for Dialog TTS (leave blank to use Generic LLM OCR settings):"
+                                                   FontSize="11" Margin="0,0,0,4" TextWrapping="Wrap" Foreground="Gray"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Text="API Base:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,6,4"/>
+                                            <TextBox x:Name="dialogTtsApiBaseTextBox" Grid.Row="0" Grid.Column="1" Margin="0,0,0,4"
+                                                     ToolTip="OpenAI-compatible API base URL (e.g. http://127.0.0.1:1234)"
+                                                     LostFocus="DialogTtsApiBaseTextBox_LostFocus"/>
+                                            <TextBlock Text="API Key:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,6,4"/>
+                                            <PasswordBox x:Name="dialogTtsApiKeyPasswordBox" Grid.Row="1" Grid.Column="1" Margin="0,0,0,4"
+                                                         ToolTip="API key for the Dialog TTS LLM endpoint"
+                                                         PasswordChanged="DialogTtsApiKeyPasswordBox_PasswordChanged"/>
+                                            <TextBlock Text="Model:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                            <TextBox x:Name="dialogTtsModelTextBox" Grid.Row="2" Grid.Column="1" Margin="0,0,0,0"
+                                                     ToolTip="Model name for the Dialog TTS LLM endpoint"
+                                                     LostFocus="DialogTtsModelTextBox_LostFocus"/>
+                                        </Grid>
+                                    </StackPanel>
+                                </StackPanel>
                                 
                                 <!-- TTS Service -->
                                 <TextBlock Text="TTS Service:" Grid.Row="2" Grid.Column="0" 

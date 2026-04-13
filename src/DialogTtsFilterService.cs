@@ -61,9 +61,15 @@ namespace UGTLive
                 return trimmedText;
             }
 
-            string apiBase = ConfigManager.Instance.GetGenericLlmOcrApiBase();
-            string apiKey = ConfigManager.Instance.GetGenericLlmOcrApiKey();
-            string model = ConfigManager.Instance.GetGenericLlmOcrModel();
+            string apiBase = ConfigManager.Instance.GetDialogTtsApiBase();
+            if (string.IsNullOrWhiteSpace(apiBase))
+                apiBase = ConfigManager.Instance.GetGenericLlmOcrApiBase();
+            string apiKey = ConfigManager.Instance.GetDialogTtsApiKey();
+            if (string.IsNullOrWhiteSpace(apiKey))
+                apiKey = ConfigManager.Instance.GetGenericLlmOcrApiKey();
+            string model = ConfigManager.Instance.GetDialogTtsModel();
+            if (string.IsNullOrWhiteSpace(model))
+                model = ConfigManager.Instance.GetGenericLlmOcrModel();
             string cacheKey = string.Join("\n",
                 apiBase?.Trim() ?? DefaultApiBase,
                 apiKey?.Trim() ?? string.Empty,

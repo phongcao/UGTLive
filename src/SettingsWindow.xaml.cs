@@ -698,6 +698,12 @@ namespace UGTLive
             // Set TTS enabled state
             ttsEnabledCheckBox.IsChecked = ConfigManager.Instance.IsTtsEnabled();
             dialogTtsCheckBox.IsChecked = ConfigManager.Instance.IsDialogTtsEnabled();
+
+            // Load Dialog TTS LLM override settings
+            dialogTtsApiBaseTextBox.Text = ConfigManager.Instance.GetDialogTtsApiBase();
+            dialogTtsApiKeyPasswordBox.Password = ConfigManager.Instance.GetDialogTtsApiKey();
+            dialogTtsModelTextBox.Text = ConfigManager.Instance.GetDialogTtsModel();
+            dialogTtsLlmSettingsPanel.Visibility = (dialogTtsCheckBox.IsChecked == true) ? Visibility.Visible : Visibility.Collapsed;
             
             // Set TTS service
             string ttsService = ConfigManager.Instance.GetTtsService();
@@ -3567,6 +3573,8 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
                 ConfigManager.Instance.SetDialogTtsEnabled(isEnabled);
                 DialogTtsFilterService.Instance.ClearCache();
 
+                dialogTtsLlmSettingsPanel.Visibility = isEnabled ? Visibility.Visible : Visibility.Collapsed;
+
                 AudioPreloadService.Instance.CancelAllPreloads();
                 AudioPlaybackManager.Instance.StopCurrentPlayback();
                 AudioPreloadService.Instance.ClearAudioCache();
@@ -3584,6 +3592,47 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating Dialog TTS state: {ex.Message}");
+            }
+        }
+
+        private void DialogTtsApiBaseTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                ConfigManager.Instance.SetDialogTtsApiBase(dialogTtsApiBaseTextBox.Text);
+                DialogTtsFilterService.Instance.ClearCache();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving Dialog TTS API base: {ex.Message}");
+            }
+        }
+
+        private void DialogTtsApiKeyPasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isInitializing)
+                    return;
+                ConfigManager.Instance.SetDialogTtsApiKey(dialogTtsApiKeyPasswordBox.Password);
+                DialogTtsFilterService.Instance.ClearCache();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving Dialog TTS API key: {ex.Message}");
+            }
+        }
+
+        private void DialogTtsModelTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                ConfigManager.Instance.SetDialogTtsModel(dialogTtsModelTextBox.Text);
+                DialogTtsFilterService.Instance.ClearCache();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving Dialog TTS model: {ex.Message}");
             }
         }
         
