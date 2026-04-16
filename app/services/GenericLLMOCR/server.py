@@ -211,6 +211,17 @@ def _strip_bbox_from_text(text: str) -> str:
     return _BBOX_IN_TEXT_RE.sub(" ", text).strip()
 
 
+def _clean_llm_text(text: str) -> str:
+    """Clean common LLM text artifacts from an extracted text field."""
+    cleaned = text.replace("</s>", "").strip()
+    cleaned = _strip_bbox_from_text(cleaned)
+    # Replace literal "\n" escape sequences (two characters) that some LLMs emit
+    cleaned = cleaned.replace("\\n", " ")
+    # Replace trailing ~ tone markers (CJK expressive style) with ! for Vietnamese
+    cleaned = re.sub(r"~+\s*$", "!", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def extract_translation_match_fields(match: re.Match) -> Tuple[str, str, str]:
     raw_bbox = (match.group("bbox_first") or match.group("bbox_after_text") or "").strip()
     llm_text = (match.group("text_after_bbox") or match.group("text_before_bbox") or "")
@@ -221,8 +232,8 @@ def extract_translation_match_fields(match: re.Match) -> Tuple[str, str, str]:
     )
     return (
         raw_bbox,
-        _strip_bbox_from_text(llm_text.replace("</s>", "").strip()),
-        _strip_bbox_from_text(translated_text.replace("</s>", "").strip()),
+        _clean_llm_text(llm_text),
+        _clean_llm_text(translated_text),
     )
 
 
@@ -570,10 +581,30 @@ def parse_bbox_values(raw_bbox: str, img_w: int, img_h: int) -> Optional[Tuple[i
     all_leq1 = all(0.0 <= c <= 1.0 for c in coords)
     all_leq999 = all(0.0 <= c <= 999.0 for c in coords)
 
+    # Some vision LLMs (e.g. Qwen VL) use [0, 999] normalized coordinates but
+    # occasionally output values slightly above 999 for text near image edges.
+    # Detect this: coords exceed the image dimensions but stay within a
+    # reasonable overshoot range, so they clearly aren't raw pixel values.
+    likely_999_overshoot = (
+        not all_leq999
+        and not all_leq1
+        and all(0.0 <= c <= 1100.0 for c in coords)
+        and max(coords) > max(img_w, img_h)
+    )
+
     if all_leq1:
         x1, x2 = x1 * img_w, x2 * img_w
         y1, y2 = y1 * img_h, y2 * img_h
-    elif all_leq999 and max(x1, x2) <= 999 and max(y1, y2) <= 999:
+    elif all_leq999 or likely_999_overshoot:
+        if likely_999_overshoot:
+            LOGGER.warning(
+                "Clamping likely [0,999] bbox coords that exceeded 999: [%s] on %sx%s image",
+                raw_bbox, img_w, img_h,
+            )
+        x1 = min(999.0, max(0.0, x1))
+        y1 = min(999.0, max(0.0, y1))
+        x2 = min(999.0, max(0.0, x2))
+        y2 = min(999.0, max(0.0, y2))
         x1, x2 = (x1 / 999.0) * img_w, (x2 / 999.0) * img_w
         y1, y2 = (y1 / 999.0) * img_h, (y2 / 999.0) * img_h
 
@@ -808,6 +839,26 @@ def query_llm_translate_text(
     return translations
 
 
+def _rejoin_continuation_lines(raw_response: str) -> List[str]:
+    """Rejoin lines where the LLM inserted a newline inside a TEXT field.
+
+    Any line that does NOT start with ``BBOX:`` is treated as a continuation
+    of the previous BBOX line and appended to it (separated by a space).
+    """
+    merged: List[str] = []
+    for line in raw_response.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if STREAMING_BBOX_PATTERN.match(stripped):
+            merged.append(stripped)
+        elif merged:
+            # Continuation of the previous BBOX line's text
+            merged[-1] = merged[-1] + " " + stripped
+        # else: stray text before any BBOX – ignore
+    return merged
+
+
 def process_llm_results(
     image: Image.Image,
     raw_response: str,
@@ -820,7 +871,7 @@ def process_llm_results(
     if not raw_response.strip() or is_no_text_response(raw_response):
         return text_objects
 
-    for raw_line in raw_response.splitlines():
+    for raw_line in _rejoin_continuation_lines(raw_response):
         text_obj = process_single_text_object(
             raw_line,
             image,

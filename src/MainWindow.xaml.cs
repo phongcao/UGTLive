@@ -2704,13 +2704,19 @@ namespace UGTLive
                     Console.WriteLine($"[TargetCapture] === END DEBUG INFO ===");
                 }
 
-                // Validate crop bounds against the native bitmap dimensions
+                // Validate crop bounds against the native bitmap dimensions.
+                // Clamp small overflows caused by DPI-scaling rounding; only fall back
+                // when the crop is completely outside the bitmap.
                 if (nativeSrcX < 0 || nativeSrcY < 0 ||
-                    nativeSrcX + nativeSrcW > nativeBmpW || nativeSrcY + nativeSrcH > nativeBmpH)
+                    nativeSrcX >= nativeBmpW || nativeSrcY >= nativeBmpH)
                 {
-                    Console.WriteLine($"[TargetCapture] Native crop ({nativeSrcX},{nativeSrcY}) {nativeSrcW}x{nativeSrcH} exceeds native bitmap {nativeBmpW}x{nativeBmpH} — falling back to screen capture");
+                    Console.WriteLine($"[TargetCapture] Native crop ({nativeSrcX},{nativeSrcY}) {nativeSrcW}x{nativeSrcH} outside native bitmap {nativeBmpW}x{nativeBmpH} — falling back to screen capture");
                     return false;
                 }
+                if (nativeSrcX + nativeSrcW > nativeBmpW)
+                    nativeSrcW = nativeBmpW - nativeSrcX;
+                if (nativeSrcY + nativeSrcH > nativeBmpH)
+                    nativeSrcH = nativeBmpH - nativeSrcY;
 
                 // Capture the target window into a temporary bitmap.
                 // For DPI-mismatched targets, use the native render size so PrintWindow
