@@ -6,6 +6,11 @@ import io
 import re
 import time
 import asyncio
+import atexit
+import logging
+import logging.handlers
+import faulthandler
+import traceback
 import wave
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -34,6 +39,89 @@ SERVICE_INSTALL_VERSION = get_config_value(SERVICE_CONFIG, 'service_install_vers
 LM_STUDIO_URL = get_config_value(SERVICE_CONFIG, 'lm_studio_url', 'http://127.0.0.1:1234')
 LM_STUDIO_MODEL = get_config_value(SERVICE_CONFIG, 'lm_studio_model', '')
 
+# ---------------------------------------------------------------------------
+# Debug-mode file logging (enabled when launched from Visual Studio debug)
+# ---------------------------------------------------------------------------
+DEBUG_MODE = os.environ.get("UGTLIVE_VISUAL_STUDIO_DEBUG", "0") == "1"
+LOG_DIR = Path(__file__).parent / "logs"
+RUNTIME_LOG_PATH = LOG_DIR / "runtime.log"
+FAULT_LOG_PATH = LOG_DIR / "fault.log"
+
+
+def _configure_logging() -> logging.Logger:
+    logger = logging.getLogger("vieneu_gguf_tts")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.INFO)
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | pid=%(process)d | %(message)s"
+    )
+
+    # Always log to stdout
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+
+    # File logging only in debug mode
+    if DEBUG_MODE:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        file_handler = logging.handlers.RotatingFileHandler(
+            RUNTIME_LOG_PATH,
+            maxBytes=2 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+LOGGER = _configure_logging()
+_FAULT_LOG_FILE = None
+
+if DEBUG_MODE:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _FAULT_LOG_FILE = open(FAULT_LOG_PATH, "a", encoding="utf-8")
+    faulthandler.enable(_FAULT_LOG_FILE, all_threads=True)
+
+
+def _append_fault_log(message: str) -> None:
+    if _FAULT_LOG_FILE is None:
+        return
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    _FAULT_LOG_FILE.write(f"[{timestamp}] {message}\n")
+    _FAULT_LOG_FILE.flush()
+
+
+def _log_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    LOGGER.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
+    _append_fault_log(
+        "Unhandled exception:\n"
+        + "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    )
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
+sys.excepthook = _log_uncaught_exception
+
+
+def _log_process_exit() -> None:
+    LOGGER.info("Process exiting pid=%s", os.getpid())
+    _append_fault_log(f"Process exiting pid={os.getpid()}")
+    if _FAULT_LOG_FILE is not None:
+        _FAULT_LOG_FILE.close()
+
+
+atexit.register(_log_process_exit)
+
 # VieNeu-TTS constants
 STANDARD_REPO = "nguyen-brat/VieNeu-TTS-Vietnamese-Finetuned"
 TURBO_REPO = "pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF"
@@ -60,7 +148,7 @@ def load_components():
 
     from vieneu.turbo import TurboVieNeuTTS, BaseVieneuTTS
 
-    print("Loading VieNeu-TTS components (codec + phonemizer + voices, NO backbone)...")
+    LOGGER.info("Loading VieNeu-TTS components (codec + phonemizer + voices, NO backbone)...")
     start_time = time.time()
 
     # Construct model without loading backbone — call BaseVieneuTTS.__init__
@@ -81,7 +169,7 @@ def load_components():
     VIENEU_MODEL = model
 
     elapsed = time.time() - start_time
-    print(f"  VieNeu components loaded in {elapsed:.1f}s")
+    LOGGER.info("VieNeu components loaded in %.1fs", elapsed)
 
 
 def load_turbo_voice_embeddings():
@@ -111,9 +199,9 @@ def load_turbo_voice_embeddings():
         elif TURBO_VOICE_EMBEDDINGS:
             DEFAULT_TURBO_EMBEDDING = next(iter(TURBO_VOICE_EMBEDDINGS.values()))
 
-        print(f"  Loaded {len(TURBO_VOICE_EMBEDDINGS)} turbo voice embeddings")
+        LOGGER.info("Loaded %d turbo voice embeddings", len(TURBO_VOICE_EMBEDDINGS))
     except Exception as e:
-        print(f"  Warning: Could not load turbo voice embeddings: {e}")
+        LOGGER.warning("Could not load turbo voice embeddings: %s", e)
 
 
 def find_turbo_embedding(voice_id: Optional[str] = None) -> Optional[np.ndarray]:
@@ -141,10 +229,10 @@ def discover_voices():
 
     if TURBO_VOICE_EMBEDDINGS:
         AVAILABLE_VOICES = [{"id": name, "name": name} for name in TURBO_VOICE_EMBEDDINGS]
-        print(f"  Discovered {len(AVAILABLE_VOICES)} turbo voices")
+        LOGGER.info("Discovered %d turbo voices", len(AVAILABLE_VOICES))
     else:
         AVAILABLE_VOICES = [{"id": "", "name": "Default"}]
-        print("  No turbo voices found, using default")
+        LOGGER.info("No turbo voices found, using default")
 
 
 def float32_to_pcm16(audio_float):
@@ -227,20 +315,19 @@ def decode_speech_tokens(speech_ids: list[int], voice_embedding: Optional[np.nda
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Pre-load VieNeu components and verify LM Studio connectivity at startup."""
-    print("=" * 60)
-    print("PRE-LOADING VIENEU-GGUF-TTS COMPONENTS AT STARTUP")
-    print(f"LM Studio URL: {LM_STUDIO_URL}")
-    print("=" * 60)
+    LOGGER.info("=" * 60)
+    LOGGER.info("PRE-LOADING VIENEU-GGUF-TTS COMPONENTS AT STARTUP")
+    LOGGER.info("LM Studio URL: %s", LM_STUDIO_URL)
+    LOGGER.info("=" * 60)
 
     try:
         load_components()
         load_turbo_voice_embeddings()
         discover_voices()
-        print("[OK] VieNeu components loaded successfully")
+        LOGGER.info("[OK] VieNeu components loaded successfully")
     except Exception as e:
-        print(f"[FAIL] Failed to load VieNeu components: {e}")
-        import traceback
-        traceback.print_exc()
+        LOGGER.error("[FAIL] Failed to load VieNeu components: %s", e, exc_info=True)
+        _append_fault_log(f"Startup failure: {e}\n" + traceback.format_exc())
         raise RuntimeError("VieNeu-GGUF-TTS startup aborted: component initialization failed") from e
 
     # Check LM Studio connectivity
@@ -250,13 +337,13 @@ async def lifespan(app: FastAPI):
             resp.raise_for_status()
             models = resp.json()
             model_ids = [m.get("id", "unknown") for m in models.get("data", [])]
-            print(f"[OK] LM Studio is reachable, loaded models: {model_ids}")
+            LOGGER.info("[OK] LM Studio is reachable, loaded models: %s", model_ids)
     except Exception as e:
-        print(f"[WARN] Could not reach LM Studio at {LM_STUDIO_URL}: {e}")
-        print("  The service will start, but TTS requests will fail until LM Studio is running.")
+        LOGGER.warning("Could not reach LM Studio at %s: %s", LM_STUDIO_URL, e)
+        LOGGER.warning("The service will start, but TTS requests will fail until LM Studio is running.")
 
-    print("[OK] Service is ready for requests!")
-    print("=" * 60)
+    LOGGER.info("[OK] Service is ready for requests!")
+    LOGGER.info("=" * 60)
 
     yield
 
@@ -337,12 +424,14 @@ async def _synthesize_audio(text: str, voice_id: Optional[str] = None):
 
         elapsed = time.time() - start_time
         duration = len(audio) / 24000
-        print(
-            f"TTS generated in {elapsed:.2f}s "
-            f"(prompt={prompt_time:.2f}s, gen={gen_time:.2f}s [{len(speech_ids)} tokens], "
-            f"decode={decode_time:.2f}s), "
-            f"audio={duration:.1f}s, "
-            f"voice={voice_id or 'default'}, text='{text_preview}'"
+        LOGGER.info(
+            "TTS generated in %.2fs "
+            "(prompt=%.2fs, gen=%.2fs [%d tokens], "
+            "decode=%.2fs), "
+            "audio=%.1fs, "
+            "voice=%s, text='%s'",
+            elapsed, prompt_time, gen_time, len(speech_ids),
+            decode_time, duration, voice_id or 'default', text_preview
         )
 
         # Convert to WAV bytes
@@ -366,18 +455,17 @@ async def _synthesize_audio(text: str, voice_id: Optional[str] = None):
     except HTTPException:
         raise
     except httpx.HTTPStatusError as e:
-        print(f"LM Studio API error: {e.response.status_code} - {e.response.text[:200]}")
+        LOGGER.error("LM Studio API error: %s - %s", e.response.status_code, e.response.text[:200])
         raise HTTPException(status_code=502, detail=f"LM Studio API error: {e.response.status_code}")
     except httpx.ConnectError:
-        print(f"Cannot connect to LM Studio at {LM_STUDIO_URL}")
+        LOGGER.error("Cannot connect to LM Studio at %s", LM_STUDIO_URL)
         raise HTTPException(
             status_code=502,
             detail=f"Cannot connect to LM Studio at {LM_STUDIO_URL}. Is it running?"
         )
     except Exception as e:
-        print(f"Error generating TTS: {e}")
-        import traceback
-        traceback.print_exc()
+        LOGGER.error("Error generating TTS: %s", e, exc_info=True)
+        _append_fault_log(f"TTS error: {e}\n" + traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -403,7 +491,7 @@ async def get_info():
 @app.post("/shutdown")
 async def shutdown():
     """Shutdown the service."""
-    print("Shutdown request received...")
+    LOGGER.info("Shutdown request received...")
 
     async def shutdown_task():
         await asyncio.sleep(1)
@@ -420,9 +508,9 @@ async def shutdown():
 if __name__ == "__main__":
     host = "127.0.0.1" if get_config_value(SERVICE_CONFIG, 'local_only', 'true') == 'true' else "0.0.0.0"
 
-    print(f"Starting {SERVICE_NAME} service on {host}:{SERVICE_PORT}")
-    print(f"LM Studio backend: {LM_STUDIO_URL}")
-    print(f"Configuration: {SERVICE_CONFIG}")
+    LOGGER.info("Starting %s service on %s:%s (debug_mode=%s)", SERVICE_NAME, host, SERVICE_PORT, DEBUG_MODE)
+    LOGGER.info("LM Studio backend: %s", LM_STUDIO_URL)
+    LOGGER.info("Configuration: %s", SERVICE_CONFIG)
 
     uvicorn.run(
         app,

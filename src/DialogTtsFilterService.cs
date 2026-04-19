@@ -230,7 +230,7 @@ namespace UGTLive
             }
 
             string normalized = text.Trim();
-            return normalized.Equals(NoDialogSentinel, StringComparison.OrdinalIgnoreCase)
+            return normalized.Contains(NoDialogSentinel, StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("no dialog", StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("no spoken dialog", StringComparison.OrdinalIgnoreCase)
                 || normalized.Equals("no spoken dialogue", StringComparison.OrdinalIgnoreCase)
