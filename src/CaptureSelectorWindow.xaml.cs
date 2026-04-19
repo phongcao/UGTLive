@@ -237,13 +237,14 @@ namespace UGTLive
                 return;
             }
 
-            Point screenPoint = this.PointToScreen(new Point(left, top));
+            Point screenTopLeft = this.PointToScreen(new Point(left, top));
+            Point screenBottomRight = this.PointToScreen(new Point(left + width, top + height));
 
             Rect selectionRect = new Rect(
-                screenPoint.X,
-                screenPoint.Y,
-                width,
-                height
+                screenTopLeft.X,
+                screenTopLeft.Y,
+                screenBottomRight.X - screenTopLeft.X,
+                screenBottomRight.Y - screenTopLeft.Y
             );
 
             SelectionComplete?.Invoke(this, selectionRect);
