@@ -196,6 +196,11 @@ namespace UGTLive
             MainWindow.Instance?.HandleDrawBorderButton();
         }
 
+        private void ResetBorderButton_Click(object sender, RoutedEventArgs e)
+        {
+            MainWindow.Instance?.HandleResetBorderButton();
+        }
+
         private void MinimizeAppButton_Click(object sender, RoutedEventArgs e)
         {
             MainWindow.Instance?.HandleMinimizeButton();

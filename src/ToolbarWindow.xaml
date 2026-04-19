@@ -163,6 +163,10 @@
             <Button x:Name="drawBorderButton" Content="Draw red border" Style="{StaticResource ToolbarButtonStyle}"
                     Click="DrawBorderButton_Click"/>
 
+            <!-- Reset red border to previous position -->
+            <Button x:Name="resetBorderButton" Content="Reset red border" Style="{StaticResource ToolbarButtonStyle}"
+                    Click="ResetBorderButton_Click"/>
+
         </StackPanel>
     </Border>
 </Window>

@@ -49,13 +49,25 @@ from server import (  # noqa: E402
     prepare_image_for_llm,
     process_llm_results,
     MODE_OCR_ONLY,
-    MODE_OCR_THEN_TRANSLATE,
     MODE_OCR_TRANSLATE,
 )
 
 
 def load_config() -> Dict[str, str]:
     return parse_service_config(str(CONFIG_PATH))
+
+
+def strip_thinking(content: str) -> Tuple[str, Optional[str]]:
+    """Strip <think>...</think> blocks from LLM output.
+    Returns (cleaned_content, thinking_text_or_None)."""
+    if not content:
+        return content, None
+    m = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+    if m:
+        thinking = m.group(1).strip()
+        cleaned = content[:m.start()] + content[m.end():]
+        return cleaned.strip(), thinking
+    return content, None
 
 
 def find_debug_image(image_path: Optional[str] = None) -> Path:
@@ -158,8 +170,17 @@ def benchmark_ocr(
 
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+        raw_content = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})
+
+        # Strip <think> blocks — chat_template_kwargs is vLLM-only and
+        # may be silently ignored by other backends.
+        content, thinking = strip_thinking(raw_content)
+        if thinking:
+            think_lines = thinking.count('\n') + 1
+            print(f"    WARNING: Model is THINKING ({len(thinking)} chars, ~{think_lines} lines) — "
+                  f"enable_thinking:False may not be supported by this backend")
+            print(f"    Think excerpt: {thinking[:120]}{'...' if len(thinking) > 120 else ''}")
 
         # Parse the response using server.py's logic
         text_objects = process_llm_results(
@@ -359,7 +380,7 @@ def benchmark_dialog_filter(
 
     for i in range(iterations):
         filtered: List[Optional[str]] = []
-        iter_start = time.perf_counter()
+        iter_api_time = 0.0
 
         for j, text in enumerate(texts):
             payload = {
@@ -379,6 +400,7 @@ def benchmark_dialog_filter(
             t0 = time.perf_counter()
             resp = requests.post(endpoint, json=payload, headers=headers, timeout=60)
             elapsed = time.perf_counter() - t0
+            iter_api_time += elapsed
             resp.raise_for_status()
 
             data = resp.json()
@@ -399,8 +421,7 @@ def benchmark_dialog_filter(
                 f"result={label}"
             )
 
-        iter_total = time.perf_counter() - iter_start
-        times.append(iter_total)
+        times.append(iter_api_time)
         last_filtered = filtered
 
     avg = sum(times) / len(times) if times else 0
@@ -466,11 +487,12 @@ def benchmark_tts(
     times: List[float] = []
 
     for i in range(iterations):
-        iter_start = time.perf_counter()
+        iter_api_time = 0.0
         for j, text in enumerate(texts):
             t0 = time.perf_counter()
             resp = make_request(text)
             elapsed = time.perf_counter() - t0
+            iter_api_time += elapsed
             resp.raise_for_status()
             audio_bytes = len(resp.content)
             duration_est = audio_bytes / (24000 * 2)  # PCM16 mono 24kHz
@@ -485,8 +507,7 @@ def benchmark_tts(
                 audio_path.write_bytes(resp.content)
                 print(f"    Audio saved to {audio_path}")
 
-        iter_total = time.perf_counter() - iter_start
-        times.append(iter_total)
+        times.append(iter_api_time)
 
     avg = sum(times) / len(times) if times else 0
     return avg

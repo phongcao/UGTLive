@@ -145,6 +145,8 @@ namespace UGTLive
         private DispatcherTimer? _startupVisibilityGuardTimer;
         private int _startupVisibilityGuardTicksRemaining = 0;
         private bool _logCaptureRectOnce = false; // Debug flag for capture rect logging
+        private double _savedLeft, _savedTop, _savedWidth, _savedHeight;
+        private bool _hasSavedBorderPosition = false;
         private DispatcherTimer _captureTimer;
         private string outputPath = DEFAULT_OUTPUT_PATH;
         private WindowInteropHelper helper;
@@ -1831,6 +1833,13 @@ namespace UGTLive
                 return;
             }
 
+            // Save current position/size so we can reset later
+            _savedLeft = this.Left;
+            _savedTop = this.Top;
+            _savedWidth = this.Width;
+            _savedHeight = this.Height;
+            _hasSavedBorderPosition = true;
+
             CaptureSelectorWindow selectorWindow2 = CaptureSelectorWindow.GetInstance();
             selectorWindow2.SelectionComplete += CaptureSelector_SelectionComplete;
             selectorWindow2.Closed += (s, e) =>
@@ -1891,6 +1900,27 @@ namespace UGTLive
             UpdateCaptureRect();
 
             Console.WriteLine($"Capture area drawn: screen({selectionRect.X:F0},{selectionRect.Y:F0} {selectionRect.Width:F0}x{selectionRect.Height:F0}) -> window({this.Left:F0},{this.Top:F0} {this.Width:F0}x{this.Height:F0})");
+        }
+
+        public void HandleResetBorderButton()
+        {
+            if (!_hasSavedBorderPosition) return;
+
+            this.Left = _savedLeft;
+            this.Top = _savedTop;
+            this.Width = _savedWidth;
+            this.Height = _savedHeight;
+
+            // Make sure the border is visible
+            if (MainBorder.Visibility != Visibility.Visible)
+            {
+                HandleHideButton();
+            }
+
+            UpdateCaptureRect();
+            _hasSavedBorderPosition = false;
+
+            Console.WriteLine($"Red border reset to: ({_savedLeft:F0},{_savedTop:F0} {_savedWidth:F0}x{_savedHeight:F0})");
         }
 
         public void HandleMinimizeButton()
