@@ -66,6 +66,7 @@ DEFAULT_MODEL = "qwen2.5-vl-7b-instruct"
 DEFAULT_MODE = "OCR + Translate"
 DEFAULT_TARGET_LANGUAGE = "en"
 DEFAULT_IGNORE_MENU_TEXT = False
+DEFAULT_MENU_ITEMS_FILTER = False
 DEFAULT_FUZZY_MATCH = True
 DEFAULT_FUZZY_THRESHOLD = 0.85
 DEFAULT_MAX_IMAGE_DIMENSION = 768
@@ -89,6 +90,19 @@ PROMPT_IGNORE_COMMON_MENU_TEXT = (
     "Focus on character dialogue, subtitles, narration, quest text, story text, cutscene text, "
     "and choice/decision prompts whose specific wording matters to the player. "
     f"If the image only contains ignorable menu or UI text, output EXACTLY {NO_TEXT_SENTINEL} and nothing else."
+)
+
+PROMPT_MENU_ITEMS_FILTER = (
+    "Focus ONLY on in-game menu items, item names, item descriptions, battle commands, "
+    "shop listings, equipment names, skill names, magic spell names, ability names, "
+    "and any text that describes what an item or ability does. "
+    "This includes consumables, weapons, armor, accessories, key items, and their stat descriptions. "
+    "Also include battle menu commands such as Attack, Defend, Guard, Flee, Use Item, Cast, Summon, Limit Break, etc. "
+    "and their equivalents in any language. "
+    "Do NOT include character names, player names, enemy names, timers, currency amounts, "
+    "HP/MP numbers, level numbers, damage numbers, generic navigation labels "
+    "(like Back, Cancel, Confirm, Yes, No), or dialogue/story text. "
+    f"If the image contains no menu items, item descriptions, or battle commands, output EXACTLY {NO_TEXT_SENTINEL} and nothing else."
 )
 
 PROMPT_OCR_ONLY = (
@@ -185,18 +199,18 @@ LANGUAGE_NAME_MAP = {
 
 TRANSLATION_PATTERN = re.compile(
     r"^\s*(?:"
-    r"BBOX:\s*\[(?P<bbox_first>[^\]]+)\]\s*\|\s*"
+    r"BBOX:\s*\[?(?P<bbox_first>[\d.,\s]+)\]?\s*(?:\|\s*)?"
     r"(?:TEXT:\s*)?(?P<text_after_bbox>.*?)(?:\s*\|\s*(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_after_bbox>.*?))?"
     r"|"
     r"TEXT:\s*(?P<text_before_bbox>.*?)\s*\|\s*"
     r"(?:(?:TRANS|TRANSLATED|TARGET|EN):\s*(?P<translated_before_bbox>.*?)\s*\|\s*)?"
-    r"BBOX:\s*\[(?P<bbox_after_text>[^\]]+)\]"
+    r"BBOX:\s*\[?(?P<bbox_after_text>[\d.,\s]+)\]?"
     r")\s*$",
     re.IGNORECASE,
 )
 
 STREAMING_BBOX_PATTERN = re.compile(
-    r"^\s*BBOX:\s*\[(?P<bbox>[^\]]+)\]",
+    r"^\s*BBOX:\s*\[?(?P<bbox>[\d.,\s]+)\]?",
     re.IGNORECASE,
 )
 
@@ -393,6 +407,14 @@ def is_ignore_menu_text_enabled(runtime_config: Dict[str, str]) -> bool:
     return (value or "").strip().lower() == "true"
 
 
+def is_menu_items_filter_enabled(runtime_config: Dict[str, str]) -> bool:
+    value = runtime_config.get(
+        "generic_llm_ocr_menu_items_filter",
+        str(DEFAULT_MENU_ITEMS_FILTER).lower(),
+    )
+    return (value or "").strip().lower() == "true"
+
+
 def is_fuzzy_match_enabled(runtime_config: Dict[str, str]) -> bool:
     value = runtime_config.get(
         "generic_llm_ocr_fuzzy_match",
@@ -478,17 +500,23 @@ def build_prompt(
     source_lang: str,
     target_lang: str,
     ignore_menu_text: bool,
+    menu_items_filter: bool = False,
 ) -> str:
-    ignore_menu_text_prompt = f"{PROMPT_IGNORE_COMMON_MENU_TEXT} " if ignore_menu_text else ""
+    filter_prompt = ""
+    if menu_items_filter:
+        filter_prompt = f"{PROMPT_MENU_ITEMS_FILTER} "
+    elif ignore_menu_text:
+        filter_prompt = f"{PROMPT_IGNORE_COMMON_MENU_TEXT} "
+
     if mode == MODE_OCR_ONLY or mode == MODE_OCR_THEN_TRANSLATE:
         return (
             f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. "
-            f"{ignore_menu_text_prompt}{PROMPT_OCR_ONLY} /no_think"
+            f"{filter_prompt}{PROMPT_OCR_ONLY} /no_think"
         )
     return (
         f"The image is {width}x{height} pixels. Source language hint: {get_language_name(source_lang)}. "
         f"Translate all detected text to {get_language_name(target_lang)}. "
-        f"{ignore_menu_text_prompt}{PROMPT_OCR_TRANSLATE} /no_think"
+        f"{filter_prompt}{PROMPT_OCR_TRANSLATE} /no_think"
     )
 
 
@@ -675,9 +703,10 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
     mode = normalize_mode(runtime_config.get("generic_llm_ocr_mode", DEFAULT_MODE))
     ignore_menu_text = is_ignore_menu_text_enabled(runtime_config)
+    menu_items_filter = is_menu_items_filter_enabled(runtime_config)
 
     endpoint = build_endpoint(api_base)
-    prompt = build_prompt(mode, width, height, source_lang, target_lang, ignore_menu_text)
+    prompt = build_prompt(mode, width, height, source_lang, target_lang, ignore_menu_text, menu_items_filter)
 
     # Convert the raw image to a data URL for OpenAI-compatible chat-completions vision APIs.
     image_data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
@@ -1065,12 +1094,20 @@ def process_partial_streaming_text_object(
         return None
 
     text_value = ""
-    text_marker_match = re.search(r"\|\s*TEXT:\s*", stripped_line, re.IGNORECASE)
-    if text_marker_match is not None:
-        text_value = stripped_line[text_marker_match.end():].replace("</s>", "").strip()
-        text_value = _strip_bbox_from_text(text_value)
-        if is_no_text_response(text_value):
-            return None
+    text_after_bbox = stripped_line[bbox_match.end():]
+    # Try explicit |TEXT: first, then fall back to whatever follows the bbox
+    explicit_marker = re.search(r"\|\s*TEXT:\s*", text_after_bbox, re.IGNORECASE)
+    if explicit_marker is not None:
+        text_value = text_after_bbox[explicit_marker.end():].replace("</s>", "").strip()
+    elif text_after_bbox.strip():
+        # No |TEXT: marker — text directly follows the bbox
+        raw = text_after_bbox.lstrip("|").strip()
+        if raw.upper().startswith("TEXT:"):
+            raw = raw[5:].strip()
+        text_value = raw.replace("</s>", "").strip()
+    text_value = _strip_bbox_from_text(text_value)
+    if text_value and is_no_text_response(text_value):
+        return None
 
     x1, y1, x2, y2 = bbox
     return {
@@ -1097,9 +1134,10 @@ def query_llm_streaming(
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
     mode = normalize_mode(runtime_config.get("generic_llm_ocr_mode", DEFAULT_MODE))
     ignore_menu_text = is_ignore_menu_text_enabled(runtime_config)
+    menu_items_filter = is_menu_items_filter_enabled(runtime_config)
 
     endpoint = build_endpoint(api_base)
-    prompt = build_prompt(mode, width, height, source_lang, target_lang, ignore_menu_text)
+    prompt = build_prompt(mode, width, height, source_lang, target_lang, ignore_menu_text, menu_items_filter)
 
     image_data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
 

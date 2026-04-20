@@ -5565,6 +5565,28 @@ namespace UGTLive
             BringToFront();
             Console.WriteLine($"Generic LLM OCR ignore menus {(isEnabled ? "enabled" : "disabled")}");
         }
+
+        public void HandleGenericLlmOcrMenuItemsFilterChanged(bool isEnabled)
+        {
+            ConfigManager.Instance.SetGenericLlmOcrMenuItemsFilterEnabled(isEnabled);
+            BringToFront();
+            Console.WriteLine($"Generic LLM OCR menu items filter {(isEnabled ? "enabled" : "disabled")}");
+        }
+
+        public void HandleSourceLanguageChanged(string langCode)
+        {
+            ConfigManager.Instance.SetSourceLanguage(langCode);
+            BringToFront();
+            Console.WriteLine($"Source language changed to: {langCode}");
+        }
+
+        public void HandleTargetLanguageChanged(string langCode)
+        {
+            ConfigManager.Instance.SetTargetLanguage(langCode);
+            ConfigManager.Instance.SetGenericLlmOcrTargetLanguage(langCode);
+            BringToFront();
+            Console.WriteLine($"Target language changed to: {langCode}");
+        }
         
         // Helper method to update mouse passthrough state
         private void updateMousePassthrough(bool enabled)
@@ -5957,6 +5979,9 @@ namespace UGTLive
             UpdateToolbarPosition();
             _toolbarWindow?.SyncTtsEnabled(ConfigManager.Instance.IsTtsEnabled());
             _toolbarWindow?.SyncGenericLlmIgnoreMenus(ConfigManager.Instance.IsGenericLlmOcrIgnoreMenuTextEnabled());
+            _toolbarWindow?.SyncGenericLlmMenuItemsFilter(ConfigManager.Instance.IsGenericLlmOcrMenuItemsFilterEnabled());
+            _toolbarWindow?.SyncSourceLanguage(ConfigManager.Instance.GetSourceLanguage());
+            _toolbarWindow?.SyncTargetLanguage(ConfigManager.Instance.GetGenericLlmOcrTargetLanguage());
         }
 
         private void UpdateToolbarPosition()

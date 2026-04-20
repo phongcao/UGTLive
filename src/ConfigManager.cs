@@ -59,6 +59,7 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_MODE = "generic_llm_ocr_mode";
         public const string GENERIC_LLM_OCR_TARGET_LANGUAGE = "generic_llm_ocr_target_language";
         public const string GENERIC_LLM_OCR_IGNORE_MENU_TEXT = "generic_llm_ocr_ignore_menu_text";
+        public const string GENERIC_LLM_OCR_MENU_ITEMS_FILTER = "generic_llm_ocr_menu_items_filter";
         public const string GENERIC_LLM_OCR_STREAMING = "generic_llm_ocr_streaming";
         public const string GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES = "generic_llm_ocr_detect_image_changes";
         public const string GENERIC_LLM_OCR_FUZZY_MATCH = "generic_llm_ocr_fuzzy_match";
@@ -511,6 +512,12 @@ namespace UGTLive
                 changed = true;
             }
 
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_MENU_ITEMS_FILTER))
+            {
+                _configValues[GENERIC_LLM_OCR_MENU_ITEMS_FILTER] = "false";
+                changed = true;
+            }
+
             if (!_configValues.ContainsKey(GENERIC_LLM_OCR_FUZZY_MATCH))
             {
                 _configValues[GENERIC_LLM_OCR_FUZZY_MATCH] = "true";
@@ -667,6 +674,7 @@ namespace UGTLive
             _configValues[GENERIC_LLM_OCR_MODE] = "OCR + Translate";
             _configValues[GENERIC_LLM_OCR_TARGET_LANGUAGE] = "en";
             _configValues[GENERIC_LLM_OCR_IGNORE_MENU_TEXT] = "false";
+            _configValues[GENERIC_LLM_OCR_MENU_ITEMS_FILTER] = "false";
             _configValues[GENERIC_LLM_OCR_FUZZY_MATCH] = "true";
             _configValues[GENERIC_LLM_OCR_FUZZY_THRESHOLD] = "0.85";
             _configValues[BLOCK_DETECTION_SCALE] = "3.00";
@@ -1163,6 +1171,17 @@ namespace UGTLive
         public void SetGenericLlmOcrIgnoreMenuTextEnabled(bool enabled)
         {
             _configValues[GENERIC_LLM_OCR_IGNORE_MENU_TEXT] = enabled.ToString().ToLowerInvariant();
+            SaveConfig();
+        }
+
+        public bool IsGenericLlmOcrMenuItemsFilterEnabled()
+        {
+            return GetBoolValue(GENERIC_LLM_OCR_MENU_ITEMS_FILTER, false);
+        }
+
+        public void SetGenericLlmOcrMenuItemsFilterEnabled(bool enabled)
+        {
+            _configValues[GENERIC_LLM_OCR_MENU_ITEMS_FILTER] = enabled.ToString().ToLowerInvariant();
             SaveConfig();
         }
 

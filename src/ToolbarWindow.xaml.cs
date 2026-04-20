@@ -46,6 +46,20 @@ namespace UGTLive
 
         private const string DEFAULT_CAPTURE_ITEM = "Screen capture (default)";
 
+        // Language options for toolbar ComboBoxes (display name → config code)
+        private static readonly (string Display, string Code)[] SOURCE_LANG_OPTIONS = new[]
+        {
+            ("Chinese", "zh"),
+            ("Japanese", "ja"),
+            ("English", "en"),
+        };
+
+        private static readonly (string Display, string Code)[] TARGET_LANG_OPTIONS = new[]
+        {
+            ("English", "en"),
+            ("Vietnamese", "vi"),
+        };
+
         public static ToolbarWindow? Instance { get; private set; }
 
         private bool _isInitialized = false;
@@ -280,6 +294,12 @@ namespace UGTLive
             MainWindow.Instance?.HandleGenericLlmOcrIgnoreMenusChanged(genericLlmIgnoreMenusCheckBox.IsChecked ?? false);
         }
 
+        private void GenericLlmMenuItemsFilterCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!_isInitialized) return;
+            MainWindow.Instance?.HandleGenericLlmOcrMenuItemsFilterChanged(genericLlmMenuItemsFilterCheckBox.IsChecked ?? false);
+        }
+
         // --- Target window capture dropdown ---
 
         /// <summary>
@@ -379,6 +399,26 @@ namespace UGTLive
             }
         }
 
+        private void SourceLangComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_isInitialized) return;
+            int idx = sourceLangComboBox.SelectedIndex;
+            if (idx >= 0 && idx < SOURCE_LANG_OPTIONS.Length)
+            {
+                MainWindow.Instance?.HandleSourceLanguageChanged(SOURCE_LANG_OPTIONS[idx].Code);
+            }
+        }
+
+        private void TargetLangComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_isInitialized) return;
+            int idx = targetLangComboBox.SelectedIndex;
+            if (idx >= 0 && idx < TARGET_LANG_OPTIONS.Length)
+            {
+                MainWindow.Instance?.HandleTargetLanguageChanged(TARGET_LANG_OPTIONS[idx].Code);
+            }
+        }
+
         /// <summary>
         /// Initialize the target window combo box from saved config.
         /// </summary>
@@ -439,6 +479,43 @@ namespace UGTLive
         {
             _isInitialized = false;
             genericLlmIgnoreMenusCheckBox.IsChecked = enabled;
+            _isInitialized = true;
+        }
+
+        public void SyncGenericLlmMenuItemsFilter(bool enabled)
+        {
+            _isInitialized = false;
+            genericLlmMenuItemsFilterCheckBox.IsChecked = enabled;
+            _isInitialized = true;
+        }
+
+        public void SyncSourceLanguage(string langCode)
+        {
+            _isInitialized = false;
+            sourceLangComboBox.Items.Clear();
+            int selectedIndex = 0;
+            for (int i = 0; i < SOURCE_LANG_OPTIONS.Length; i++)
+            {
+                sourceLangComboBox.Items.Add(SOURCE_LANG_OPTIONS[i].Display);
+                if (string.Equals(SOURCE_LANG_OPTIONS[i].Code, langCode, StringComparison.OrdinalIgnoreCase))
+                    selectedIndex = i;
+            }
+            sourceLangComboBox.SelectedIndex = selectedIndex;
+            _isInitialized = true;
+        }
+
+        public void SyncTargetLanguage(string langCode)
+        {
+            _isInitialized = false;
+            targetLangComboBox.Items.Clear();
+            int selectedIndex = 0;
+            for (int i = 0; i < TARGET_LANG_OPTIONS.Length; i++)
+            {
+                targetLangComboBox.Items.Add(TARGET_LANG_OPTIONS[i].Display);
+                if (string.Equals(TARGET_LANG_OPTIONS[i].Code, langCode, StringComparison.OrdinalIgnoreCase))
+                    selectedIndex = i;
+            }
+            targetLangComboBox.SelectedIndex = selectedIndex;
             _isInitialized = true;
         }
     }
