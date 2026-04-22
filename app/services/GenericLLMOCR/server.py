@@ -4,11 +4,13 @@ import asyncio
 import atexit
 import base64
 import faulthandler
+import json
 import logging
 import os
 import re
 import ssl
 import sys
+import threading
 import time
 import traceback
 import unicodedata
@@ -71,6 +73,9 @@ DEFAULT_FUZZY_MATCH = True
 DEFAULT_FUZZY_THRESHOLD = 0.85
 DEFAULT_MAX_IMAGE_DIMENSION = 768
 DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000
+DEFAULT_TRANSLATION_CACHE_MAX_SIZE = 10000
+DEFAULT_TRANSLATION_CACHE_SAVE_INTERVAL = 300  # seconds
+TRANSLATION_CACHE_PATH = Path(__file__).parent / "translation_cache.json"
 NO_TEXT_SENTINEL = "__UGTLIVE_NO_TEXT__"
 DEBUG_IMAGE_DIR = Path(__file__).parent / "debug"
 DEBUG_IMAGE_ENV_VAR = "UGTLIVE_VISUAL_STUDIO_DEBUG"
@@ -215,7 +220,7 @@ STREAMING_BBOX_PATTERN = re.compile(
 )
 
 _BBOX_IN_TEXT_RE = re.compile(
-    r"\s*\|?\s*BBOX:\s*\[[^\]]*\]\s*\|?\s*",
+    r"\s*\|?\s*BBOX\"?:\s*\[?[^\]]*\]?\s*\|?\s*",
     re.IGNORECASE,
 )
 
@@ -330,6 +335,169 @@ def log_process_exit() -> None:
 
 
 atexit.register(log_process_exit)
+
+
+class TranslationCache:
+    """LFU cache for OCR-to-translation mappings, persisted to JSON."""
+
+    def __init__(self, cache_path: Path, max_size: int, save_interval: float):
+        self._cache: Dict[str, Dict] = {}
+        self._cache_path = cache_path
+        self._max_size = max_size
+        self._save_interval = save_interval
+        self._dirty = False
+        self._last_save_time = time.time()
+        self._lock = threading.Lock()
+        self._load()
+
+    # Fullwidth → ASCII punctuation map for cache key normalization
+    _FULLWIDTH_PUNCTUATION_MAP = str.maketrans({
+        "\uFF1A": ":",   # ：
+        "\uFF1B": ";",   # ；
+        "\uFF0C": ",",   # ，
+        "\uFF0E": ".",   # ．
+        "\u3002": ".",   # 。
+        "\uFF01": "!",   # ！
+        "\uFF1F": "?",   # ？
+        "\uFF08": "(",   # （
+        "\uFF09": ")",   # ）
+        "\u3010": "[",   # 【
+        "\u3011": "]",   # 】
+        "\u201C": '"',   # "
+        "\u201D": '"',   # "
+        "\u2018": "'",   # '
+        "\u2019": "'",   # '
+        "\uFF5E": "~",   # ～
+        "\uFF06": "&",   # ＆
+        "\uFF20": "@",   # ＠
+        "\uFF03": "#",   # ＃
+        "\uFF04": "$",   # ＄
+        "\uFF05": "%",   # ％
+        "\uFF3E": "^",   # ＾
+        "\uFF0A": "*",   # ＊
+        "\uFF0B": "+",   # ＋
+        "\uFF1D": "=",   # ＝
+        "\uFF0F": "/",   # ／
+        "\uFF3C": "\\",  # ＼
+        "\uFF5C": "|",   # ｜
+        "\uFF1C": "<",   # ＜
+        "\uFF1E": ">",   # ＞
+    })
+
+    @staticmethod
+    def _normalize_key(text: str, target_lang: str) -> str:
+        normalized = (text or "").strip()
+        normalized = normalized.replace("\\n", " ").replace("\n", " ")
+        normalized = normalized.translate(TranslationCache._FULLWIDTH_PUNCTUATION_MAP)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return ""
+        return f"{target_lang.strip().lower()}||{normalized}"
+
+    def get(self, source_text: str, target_lang: str) -> Optional[str]:
+        key = self._normalize_key(source_text, target_lang)
+        if not key:
+            return None
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                entry["hits"] += 1
+                self._dirty = True
+                self._maybe_periodic_save()
+                return entry["translated"]
+        return None
+
+    def put(self, source_text: str, translated_text: str, target_lang: str) -> None:
+        key = self._normalize_key(source_text, target_lang)
+        if not key or not translated_text:
+            return
+        with self._lock:
+            existing_hits = self._cache.get(key, {}).get("hits", 0)
+            self._cache[key] = {
+                "source": source_text.strip(),
+                "translated": translated_text,
+                "target_lang": target_lang.strip().lower(),
+                "hits": existing_hits + 1,
+            }
+            self._dirty = True
+            self._evict_if_needed()
+            self._maybe_periodic_save()
+
+    def _evict_if_needed(self) -> None:
+        if len(self._cache) <= self._max_size:
+            return
+        evict_count = max(1, len(self._cache) // 10)
+        sorted_keys = sorted(self._cache, key=lambda k: self._cache[k]["hits"])
+        for key in sorted_keys[:evict_count]:
+            del self._cache[key]
+        LOGGER.info(
+            "Translation cache evicted %d entries, size now %d",
+            evict_count, len(self._cache),
+        )
+
+    def _maybe_periodic_save(self) -> None:
+        now = time.time()
+        if self._dirty and (now - self._last_save_time) >= self._save_interval:
+            self._save_unlocked()
+
+    def _load(self) -> None:
+        if not self._cache_path.exists():
+            LOGGER.info("No translation cache file at %s, starting fresh", self._cache_path)
+            return
+        try:
+            with open(self._cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._cache = data
+            LOGGER.info(
+                "Loaded translation cache: %d entries from %s",
+                len(self._cache), self._cache_path,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to load translation cache from %s: %s",
+                self._cache_path, exc,
+            )
+
+    def save(self) -> None:
+        with self._lock:
+            self._save_unlocked()
+
+    def _save_unlocked(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._cache_path.with_suffix(".tmp")
+            sorted_cache = dict(
+                sorted(self._cache.items(), key=lambda item: item[1].get("hits", 0), reverse=True)
+            )
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(sorted_cache, f, ensure_ascii=False, indent=2)
+            tmp_path.replace(self._cache_path)
+            self._dirty = False
+            self._last_save_time = time.time()
+            LOGGER.info(
+                "Saved translation cache: %d entries to %s",
+                len(self._cache), self._cache_path,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to save translation cache to %s: %s",
+                self._cache_path, exc,
+            )
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
+
+_TRANSLATION_CACHE = TranslationCache(
+    TRANSLATION_CACHE_PATH,
+    DEFAULT_TRANSLATION_CACHE_MAX_SIZE,
+    DEFAULT_TRANSLATION_CACHE_SAVE_INTERVAL,
+)
+atexit.register(_TRANSLATION_CACHE.save)
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_INSTALL_VERSION)
 OCR_PROCESS_SEMAPHORE = asyncio.Semaphore(1)
@@ -779,24 +947,63 @@ def query_llm(image_bytes: bytes, width: int, height: int, runtime_config: Dict[
     return content, model, mode
 
 
+# Regex matching text that needs no translation (numbers, timestamps, ranges, punctuation)
+_NO_TRANSLATE_RE = re.compile(r"^[\d\s\-:;.,~!?/\\|<>()[\]{}+=%^*#@&$'\"]+$")
+
+
+def _is_no_translate_text(text: str) -> bool:
+    """Return True if the text is purely numeric/punctuation and needs no translation."""
+    normalized = (text or "").strip().translate(TranslationCache._FULLWIDTH_PUNCTUATION_MAP)
+    return bool(_NO_TRANSLATE_RE.match(normalized))
+
+
 def query_llm_translate_text(
     text_objects: List[Dict],
     runtime_config: Dict[str, str],
     source_lang: str,
     target_lang: str,
 ) -> List[str]:
-    """Make a text-only LLM call to translate OCR results in a second pass."""
+    """Make a text-only LLM call to translate OCR results in a second pass.
+
+    Cached translations are reused; only uncached texts are sent to the LLM.
+    """
     if not text_objects:
         return []
+
+    translations: List[str] = [""] * len(text_objects)
+    uncached_indices: List[int] = []
+
+    # Check cache for each text object; skip translation for numeric/punctuation-only text
+    for i, obj in enumerate(text_objects):
+        source = obj["text"]
+        if _is_no_translate_text(source):
+            translations[i] = source
+            continue
+        cached = _TRANSLATION_CACHE.get(source, target_lang)
+        if cached is not None:
+            translations[i] = cached
+        else:
+            uncached_indices.append(i)
+
+    cached_count = len(text_objects) - len(uncached_indices)
+    LOGGER.info(
+        "Translation cache: %d/%d cached, %d to translate",
+        cached_count, len(text_objects), len(uncached_indices),
+    )
+
+    if not uncached_indices:
+        return translations
+
+    # Build numbered list of only uncached source texts
+    uncached_objects = [text_objects[i] for i in uncached_indices]
 
     api_base = runtime_config.get("generic_llm_ocr_api_base", DEFAULT_API_BASE)
     api_key = runtime_config.get("generic_llm_ocr_api_key", "")
     model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
     endpoint = build_endpoint(api_base)
 
-    # Build numbered list of source texts
     numbered_lines = []
-    for i, obj in enumerate(text_objects, 1):
+    for i, obj in enumerate(uncached_objects, 1):
         numbered_lines.append(f"{i}. {obj['text']}")
     numbered_text = "\n".join(numbered_lines)
 
@@ -824,8 +1031,8 @@ def query_llm_translate_text(
 
     request_started = time.time()
     LOGGER.info(
-        "LLM translation request start model=%s endpoint=%s source_lang=%s target_lang=%s text_count=%s",
-        model, endpoint, source_lang, target_lang, len(text_objects),
+        "LLM translation request start model=%s endpoint=%s source_lang=%s target_lang=%s text_count=%s (uncached)",
+        model, endpoint, source_lang, target_lang, len(uncached_objects),
     )
 
     try:
@@ -852,7 +1059,7 @@ def query_llm_translate_text(
     LOGGER.info("LLM translation raw response: %s", content)
 
     # Parse numbered translations from response
-    translations: List[str] = [""] * len(text_objects)
+    new_translations: List[str] = [""] * len(uncached_objects)
     if content:
         for line in content.strip().splitlines():
             line = line.strip()
@@ -862,8 +1069,15 @@ def query_llm_translate_text(
             m = re.match(r"^(\d+)[.)]\s*(.+)$", line)
             if m:
                 idx = int(m.group(1)) - 1
-                if 0 <= idx < len(translations):
-                    translations[idx] = m.group(2).strip()
+                if 0 <= idx < len(new_translations):
+                    new_translations[idx] = m.group(2).strip()
+
+    # Merge new translations into results and update cache
+    for list_idx, orig_idx in enumerate(uncached_indices):
+        trans = new_translations[list_idx]
+        if trans:
+            translations[orig_idx] = trans
+            _TRANSLATION_CACHE.put(text_objects[orig_idx]["text"], trans, target_lang)
 
     return translations
 
@@ -1342,6 +1556,7 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    _TRANSLATION_CACHE.save()
     LOGGER.info("Service shutdown requested pid=%s", os.getpid())
     append_fault_log(f"Service shutdown requested pid={os.getpid()}")
 
@@ -1498,6 +1713,7 @@ async def get_info():
 @app.post("/shutdown")
 async def shutdown():
     LOGGER.info("Shutdown request received")
+    _TRANSLATION_CACHE.save()
 
     async def shutdown_task():
         await asyncio.sleep(1)

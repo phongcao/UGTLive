@@ -435,4 +435,4 @@ raw_test_output.png
 temp_processing_image.png
 manual_debug.png
 app/services/GenericLLMOCR/server_log.txt
-
+translation_cache.json
