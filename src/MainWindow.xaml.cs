@@ -2240,6 +2240,33 @@ namespace UGTLive
         // Remember the settings window position
         private double settingsWindowLeft = -1;
         private double settingsWindowTop = -1;
+
+        private void EnsureSettingsWindowOnScreen(Window settingsWindow)
+        {
+            double width = double.IsNaN(settingsWindow.Width) || settingsWindow.Width <= 0 ? 800 : settingsWindow.Width;
+            double height = double.IsNaN(settingsWindow.Height) || settingsWindow.Height <= 0 ? 560 : settingsWindow.Height;
+            double left = settingsWindow.Left;
+            double top = settingsWindow.Top;
+
+            if (!double.IsNaN(left) && !double.IsNaN(top) && ConfigManager.IsWindowBoundsValid(left, top, width, height))
+            {
+                return;
+            }
+
+            var workArea = System.Windows.Forms.Screen.PrimaryScreen?.WorkingArea;
+            if (workArea.HasValue)
+            {
+                settingsWindow.Left = workArea.Value.Left + Math.Max(0, (workArea.Value.Width - width) / 2);
+                settingsWindow.Top = workArea.Value.Top + Math.Max(0, (workArea.Value.Height - height) / 2);
+            }
+            else
+            {
+                settingsWindow.Left = 120;
+                settingsWindow.Top = 120;
+            }
+
+            Console.WriteLine($"Settings window position reset to on-screen area: Left={settingsWindow.Left}, Top={settingsWindow.Top} (was Left={left}, Top={top})");
+        }
         
         // Show/hide the settings window
         private void ToggleSettingsWindow()
@@ -2292,6 +2319,8 @@ namespace UGTLive
                 {
                     settingsWindow.WindowState = WindowState.Normal;
                 }
+
+                EnsureSettingsWindowOnScreen(settingsWindow);
                 
                 // Set MainWindow as owner to ensure Settings window appears above it
                 settingsWindow.Owner = this;
@@ -5504,9 +5533,14 @@ namespace UGTLive
         {
             base.OnDeactivated(e);
 
+            if (SettingsWindow.IsOpenAndVisible())
+            {
+                return;
+            }
+
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (IsVisible && WindowState != WindowState.Minimized)
+                if (IsVisible && WindowState != WindowState.Minimized && !SettingsWindow.IsOpenAndVisible())
                 {
                     BringToFront();
                 }
@@ -5516,6 +5550,9 @@ namespace UGTLive
         private void TopmostGuard_Tick(object? sender, EventArgs e)
         {
             if (!IsVisible || WindowState == WindowState.Minimized)
+                return;
+
+            if (SettingsWindow.IsOpenAndVisible())
                 return;
 
             var hwnd = new WindowInteropHelper(this).Handle;

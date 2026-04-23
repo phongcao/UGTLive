@@ -179,17 +179,30 @@ namespace UGTLive
         
         // Flag to prevent saving during initialization
         private static bool _isInitializing = true;
+        private bool _settingsInitializationQueued;
+        private bool _settingsInitialized;
         
         // Collection to hold the ignore phrases
         private ObservableCollection<IgnorePhrase> _ignorePhrases = new ObservableCollection<IgnorePhrase>();
         
         private void SettingsWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            if (_settingsInitialized || _settingsInitializationQueued)
+            {
+                return;
+            }
+
+            _settingsInitializationQueued = true;
+            Dispatcher.BeginInvoke(new Action(InitializeSettingsWindowAfterRender), System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        private void InitializeSettingsWindowAfterRender()
+        {
             try
             {
                 if (ConfigManager.Instance.GetLogExtraDebugStuff())
                 {
-                    Console.WriteLine("SettingsWindow_Loaded: Starting initialization");
+                    Console.WriteLine("SettingsWindow initialization: Starting deferred setup");
                 }
                 
                 // Set initialization flag to prevent saving during setup
@@ -223,6 +236,7 @@ namespace UGTLive
                 
                 // Now that initialization is complete, allow saving changes
                 _isInitializing = false;
+                _settingsInitialized = true;
                 
                 // Force the OCR method and translation service to match the config again
                 // This ensures the config values are preserved and not overwritten
@@ -242,6 +256,10 @@ namespace UGTLive
             {
                 Console.WriteLine($"Error initializing Settings window: {ex.Message}");
                 _isInitializing = false; // Ensure we don't get stuck in initialization mode
+            }
+            finally
+            {
+                _settingsInitializationQueued = false;
             }
         }
         
@@ -1184,6 +1202,16 @@ namespace UGTLive
                 genericLlmOcrFuzzyThresholdTextBox.Text = ConfigManager.Instance.GetGenericLlmOcrFuzzyThreshold();
             }
         }
+
+        private void GenericLlmOcrBackgroundPrepCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            bool isEnabled = genericLlmOcrBackgroundPrepCheckBox.IsChecked ?? true;
+            ConfigManager.Instance.SetGenericLlmOcrBackgroundPrepEnabled(isEnabled);
+            RefreshAfterGenericLlmOcrSettingChange();
+        }
         
         private void AutoTranslateCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
         {
@@ -1455,6 +1483,8 @@ namespace UGTLive
                             genericLlmOcrFuzzyThresholdTextBox.Text = ConfigManager.Instance.GetGenericLlmOcrFuzzyThreshold();
                         }
                     }
+                    if (genericLlmOcrBackgroundPrepCheckBox != null)
+                        genericLlmOcrBackgroundPrepCheckBox.IsChecked = ConfigManager.Instance.IsGenericLlmOcrBackgroundPrepEnabled();
                 }
 
                 // Confidence settings are only useful for EasyOCR, docTR, and Google Vision
@@ -6014,45 +6044,15 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
         
         private void SettingsWindow_SourceInitialized(object? sender, EventArgs e)
         {
-            // Apply WDA_EXCLUDEFROMCAPTURE as early as possible (right after HWND creation)
-            SetExcludeFromCapture();
+            // WDA_EXCLUDEFROMCAPTURE can cause this WPF window to appear black or become
+            // effectively unclickable on some systems/GPU drivers. The toolbar already
+            // avoids using it for the same reason, so keep Settings visible/reliable.
         }
         
         private void SetExcludeFromCapture()
         {
-            try
-            {
-                // Check if user wants windows visible in screenshots
-                bool visibleInScreenshots = ConfigManager.Instance.GetWindowsVisibleInScreenshots();
-                
-                var helper = new WindowInteropHelper(this);
-                IntPtr hwnd = helper.Handle;
-                
-                if (hwnd != IntPtr.Zero)
-                {
-                    // If visibleInScreenshots is true, set to WDA_NONE (include in capture)
-                    // If visibleInScreenshots is false, set to WDA_EXCLUDEFROMCAPTURE (exclude from capture)
-                    uint affinity = visibleInScreenshots ? WDA_NONE : WDA_EXCLUDEFROMCAPTURE;
-                    bool success = SetWindowDisplayAffinity(hwnd, affinity);
-                    
-                    if (success)
-                    {
-                        Console.WriteLine($"Settings window {(visibleInScreenshots ? "included in" : "excluded from")} screen capture successfully (HWND: {hwnd})");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Failed to set Settings window capture mode. Last error: {Marshal.GetLastWin32Error()}");
-                    }
-                }
-                else
-                {
-                    Console.WriteLine("Settings window HWND is null, cannot set capture mode");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error setting Settings window capture mode: {ex.Message}");
-            }
+            // Intentionally disabled. Using WDA_EXCLUDEFROMCAPTURE here has been observed
+            // to make the Settings window black/invisible on some systems.
         }
         
         public void UpdateCaptureExclusion()

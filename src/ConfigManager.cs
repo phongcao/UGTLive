@@ -64,6 +64,7 @@ namespace UGTLive
         public const string GENERIC_LLM_OCR_DETECT_IMAGE_CHANGES = "generic_llm_ocr_detect_image_changes";
         public const string GENERIC_LLM_OCR_FUZZY_MATCH = "generic_llm_ocr_fuzzy_match";
         public const string GENERIC_LLM_OCR_FUZZY_THRESHOLD = "generic_llm_ocr_fuzzy_threshold";
+        public const string GENERIC_LLM_OCR_BACKGROUND_PREP = "generic_llm_ocr_background_prep";
         
         // Per-OCR glue settings (for EasyOCR, MangaOCR, docTR, Windows OCR, Google Vision)
         // Format: horizontal_glue_<ocrmethod>, vertical_glue_<ocrmethod>, keep_linefeeds_<ocrmethod>, leave_translation_onscreen_<ocrmethod>
@@ -530,6 +531,12 @@ namespace UGTLive
                 changed = true;
             }
 
+            if (!_configValues.ContainsKey(GENERIC_LLM_OCR_BACKGROUND_PREP))
+            {
+                _configValues[GENERIC_LLM_OCR_BACKGROUND_PREP] = "true";
+                changed = true;
+            }
+
             return changed;
         }
 
@@ -677,6 +684,7 @@ namespace UGTLive
             _configValues[GENERIC_LLM_OCR_MENU_ITEMS_FILTER] = "false";
             _configValues[GENERIC_LLM_OCR_FUZZY_MATCH] = "true";
             _configValues[GENERIC_LLM_OCR_FUZZY_THRESHOLD] = "0.85";
+            _configValues[GENERIC_LLM_OCR_BACKGROUND_PREP] = "true";
             _configValues[BLOCK_DETECTION_SCALE] = "3.00";
             _configValues[BLOCK_DETECTION_SETTLE_TIME] = "0.15";
             _configValues[BLOCK_DETECTION_MAX_SETTLE_TIME] = "1.00";
@@ -1222,6 +1230,17 @@ namespace UGTLive
         public void SetGenericLlmOcrFuzzyThreshold(string threshold)
         {
             _configValues[GENERIC_LLM_OCR_FUZZY_THRESHOLD] = threshold;
+            SaveConfig();
+        }
+
+        public bool IsGenericLlmOcrBackgroundPrepEnabled()
+        {
+            return GetBoolValue(GENERIC_LLM_OCR_BACKGROUND_PREP, true);
+        }
+
+        public void SetGenericLlmOcrBackgroundPrepEnabled(bool enabled)
+        {
+            _configValues[GENERIC_LLM_OCR_BACKGROUND_PREP] = enabled.ToString().ToLowerInvariant();
             SaveConfig();
         }
         

@@ -266,6 +266,7 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto"/>
@@ -307,6 +308,13 @@
                                     <TextBox x:Name="genericLlmOcrFuzzyThresholdTextBox" Grid.Row="5" Grid.Column="1"
                                              Margin="0,0,0,6" LostFocus="GenericLlmOcrFuzzyThresholdTextBox_LostFocus"
                                              ToolTip="Similarity threshold (0.0–1.0). Higher values require closer matches to suppress re-rendering. Default: 0.85"/>
+
+                                    <TextBlock Text="Background image prep:" Grid.Row="6" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <CheckBox x:Name="genericLlmOcrBackgroundPrepCheckBox" Grid.Row="6" Grid.Column="1"
+                                              Margin="0,0,0,6"
+                                              Checked="GenericLlmOcrBackgroundPrepCheckBox_CheckedChanged"
+                                              Unchecked="GenericLlmOcrBackgroundPrepCheckBox_CheckedChanged"
+                                              ToolTip="When enabled, PNG encoding and Generic LLM frame-change checks run off the UI thread to reduce input lag. Disable this to compare against the old behavior."/>
                                 </Grid>
                                 
                                 <!-- Pause OCR While Translating -->
