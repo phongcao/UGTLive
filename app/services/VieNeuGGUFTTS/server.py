@@ -309,6 +309,54 @@ def discover_voices():
             LOGGER.info("No turbo voices found, using default")
 
 
+def time_stretch_audio(audio: np.ndarray, speed: float) -> np.ndarray:
+    """Time-stretch audio with WSOLA while preserving pitch.
+
+    Uses the tested audiotsm WSOLA implementation instead of a handwritten
+    overlap-add loop. Padding the input tail gives the stretcher enough
+    context to keep the final phonemes from being clipped.
+    """
+    if speed == 1.0:
+        return audio
+
+    from audiotsm import wsola
+    from audiotsm.io.array import ArrayReader, ArrayWriter
+
+    audio_array = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if audio_array.size == 0:
+        return audio_array
+
+    target_len = max(1, int(round(audio_array.size / speed)))
+
+    if audio_array.size < 256:
+        source_positions = np.arange(audio_array.size, dtype=np.float32)
+        target_positions = np.linspace(0, audio_array.size - 1, target_len, dtype=np.float32)
+        return np.interp(target_positions, source_positions, audio_array).astype(np.float32)
+
+    frame_length = min(1024, 1 << int(np.floor(np.log2(audio_array.size))))
+    tolerance = frame_length // 2
+
+    # Pad with the final sample so WSOLA can synthesize the real tail instead
+    # of running out of context near the end of the utterance.
+    padded_audio = np.pad(audio_array, (0, frame_length + tolerance), mode="edge")
+    reader = ArrayReader(padded_audio[np.newaxis, :])
+    writer = ArrayWriter(1)
+
+    stretcher = wsola(1, speed=speed, frame_length=frame_length, tolerance=tolerance)
+    stretcher.run(reader, writer)
+
+    stretched_audio = np.asarray(writer.data[0], dtype=np.float32)
+    if stretched_audio.size == 0:
+        source_positions = np.arange(audio_array.size, dtype=np.float32)
+        target_positions = np.linspace(0, audio_array.size - 1, target_len, dtype=np.float32)
+        return np.interp(target_positions, source_positions, audio_array).astype(np.float32)
+
+    if stretched_audio.size < target_len:
+        stretched_audio = np.pad(stretched_audio, (0, target_len - stretched_audio.size), mode="edge")
+
+    return stretched_audio[:target_len]
+
+
 def float32_to_pcm16(audio_float):
     """Convert float32 [-1, 1] to int16 bytes."""
     audio_array = np.asarray(audio_float, dtype=np.float32)
@@ -500,6 +548,7 @@ app = FastAPI(title=SERVICE_NAME, version=SERVICE_INSTALL_VERSION, lifespan=life
 class TTSRequest(BaseModel):
     text: str
     voice_id: Optional[str] = None
+    speed: Optional[float] = 1.0
 
 
 @app.get("/voices")
@@ -511,26 +560,29 @@ async def get_voices():
 
 
 @app.get("/stream")
-async def stream_audio_get(text: str, voice_id: Optional[str] = None):
+async def stream_audio_get(text: str, voice_id: Optional[str] = None, speed: Optional[float] = 1.0):
     """Streaming TTS endpoint (GET). Returns audio/wav."""
-    return await _synthesize_audio(text, voice_id)
+    return await _synthesize_audio(text, voice_id, speed)
 
 
 @app.post("/stream")
 async def stream_audio_post(req: TTSRequest):
     """Streaming TTS endpoint (POST). Returns audio/wav."""
-    return await _synthesize_audio(req.text, req.voice_id)
+    return await _synthesize_audio(req.text, req.voice_id, req.speed)
 
 
 @app.post("/tts")
 async def tts_endpoint(req: TTSRequest):
     """Non-streaming TTS endpoint. Returns audio/wav."""
-    return await _synthesize_audio(req.text, req.voice_id)
+    return await _synthesize_audio(req.text, req.voice_id, req.speed)
 
 
-async def _synthesize_audio(text: str, voice_id: Optional[str] = None):
+async def _synthesize_audio(text: str, voice_id: Optional[str] = None, speed: Optional[float] = 1.0):
     """Synthesize audio from text via LM Studio and return as WAV."""
     global VIENEU_MODEL, NEUCODEC_DECODER
+
+    speed = speed if speed is not None else 1.0
+    speed = max(0.25, min(4.0, speed))
 
     if VIENEU_MODEL is None:
         raise HTTPException(status_code=503, detail="Model components not loaded yet")
@@ -559,6 +611,10 @@ async def _synthesize_audio(text: str, voice_id: Optional[str] = None):
         audio = decode_speech_tokens(speech_ids, voice_embedding)
         decode_time = time.time() - decode_start
 
+        # Apply speed adjustment after decoding while keeping pitch stable.
+        if speed != 1.0:
+            audio = time_stretch_audio(audio, speed)
+
         elapsed = time.time() - start_time
         duration = len(audio) / 24000
         LOGGER.info(
@@ -566,9 +622,9 @@ async def _synthesize_audio(text: str, voice_id: Optional[str] = None):
             "(prompt=%.2fs, gen=%.2fs [%d tokens], "
             "decode=%.2fs), "
             "audio=%.1fs, "
-            "voice=%s, text='%s'",
+            "speed=%.2f, voice=%s, text='%s'",
             elapsed, prompt_time, gen_time, len(speech_ids),
-            decode_time, duration, voice_id or 'default', text_preview
+            decode_time, duration, speed, voice_id or 'default', text_preview
         )
 
         # Convert to WAV bytes

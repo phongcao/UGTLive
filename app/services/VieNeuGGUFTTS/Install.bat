@@ -181,9 +181,9 @@ if errorlevel 1 (
 )
 echo transformers installed successfully >> "%LOG_FILE%"
 
-echo [Step 4/5] Installing FastAPI, Uvicorn, and httpx...
-echo [Step 4/5] Installing FastAPI/Uvicorn/httpx... >> "%LOG_FILE%"
-python -m pip install fastapi "uvicorn[standard]" certifi numpy httpx >> "%LOG_FILE%" 2>&1
+echo [Step 4/5] Installing FastAPI, Uvicorn, httpx, and audiotsm...
+echo [Step 4/5] Installing FastAPI/Uvicorn/httpx/audiotsm... >> "%LOG_FILE%"
+python -m pip install fastapi "uvicorn[standard]" certifi numpy httpx audiotsm >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
     echo ERROR: Failed to install FastAPI/Uvicorn/httpx!
     echo ERROR: Failed to install FastAPI/Uvicorn/httpx >> "%LOG_FILE%"
