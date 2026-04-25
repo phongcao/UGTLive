@@ -38,6 +38,9 @@ SERVICE_PORT = int(get_config_value(SERVICE_CONFIG, 'port', '5008'))
 SERVICE_INSTALL_VERSION = get_config_value(SERVICE_CONFIG, 'service_install_version', '1')
 LM_STUDIO_URL = get_config_value(SERVICE_CONFIG, 'lm_studio_url', 'http://127.0.0.1:1234')
 LM_STUDIO_MODEL = get_config_value(SERVICE_CONFIG, 'lm_studio_model', '')
+# Model type: 'turbo' for VieNeu-TTS-v2-Turbo-GGUF, 'standard' for VieNeu-TTS-q8-gguf
+MODEL_TYPE = get_config_value(SERVICE_CONFIG, 'model_type', 'turbo').lower()
+DEFAULT_VOICE_CONFIG = get_config_value(SERVICE_CONFIG, 'default_voice', '')
 
 # ---------------------------------------------------------------------------
 # Debug-mode file logging (enabled when launched from Visual Studio debug)
@@ -123,16 +126,22 @@ def _log_process_exit() -> None:
 atexit.register(_log_process_exit)
 
 # VieNeu-TTS constants
-STANDARD_REPO = "nguyen-brat/VieNeu-TTS-Vietnamese-Finetuned"
+STANDARD_REPO = "pnnbao-ump/VieNeu-TTS-q8-gguf"
 TURBO_REPO = "pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF"
 CODEC_REPO = "pnnbao-ump/VieNeu-Codec"
+NEUCODEC_ONNX_REPO = "neuphonic/neucodec-onnx-decoder-int8"
 SPEECH_MAX    = 65535
 
 # Global references
 VIENEU_MODEL = None
+NEUCODEC_DECODER = None  # NeuCodec ONNX decoder for standard model
 AVAILABLE_VOICES = []
 TURBO_VOICE_EMBEDDINGS = {}   # {voice_name: np.ndarray shape (1, 128)}
 DEFAULT_TURBO_EMBEDDING = None
+
+# Standard model voice data: {voice_name: {"codes": list[int], "text": str, "description": str}}
+STANDARD_VOICE_PRESETS = {}
+DEFAULT_STANDARD_VOICE = None
 
 # Regex to extract speech token numbers from generated text
 SPEECH_TOKEN_RE = re.compile(r"<\|speech_(\d+)\|>")
@@ -141,35 +150,45 @@ SPEECH_TOKEN_RE = re.compile(r"<\|speech_(\d+)\|>")
 def load_components():
     """Load VieNeu codec (decoder/encoder), phonemizer, and voices.
 
-    The LLM backbone is handled by LM Studio, so we skip backbone loading
-    by constructing TurboVieNeuTTS manually and only loading the codec + voices.
+    The LLM backbone is handled by LM Studio, so we skip backbone loading.
+    Loads different codec depending on MODEL_TYPE.
     """
-    global VIENEU_MODEL
+    global VIENEU_MODEL, NEUCODEC_DECODER
 
-    from vieneu.turbo import TurboVieNeuTTS, BaseVieneuTTS
-
-    LOGGER.info("Loading VieNeu-TTS components (codec + phonemizer + voices, NO backbone)...")
     start_time = time.time()
 
-    # Construct model without loading backbone — call BaseVieneuTTS.__init__
-    # then load only decoder, encoder, and voices.
-    model = TurboVieNeuTTS.__new__(TurboVieNeuTTS)
-    BaseVieneuTTS.__init__(model)
-    model.backbone = None
-    model.decoder_sess = None
-    model.encoder_sess = None
-    model._is_onnx_codec = True
-    model.max_context = 4096
-    model.device = "cpu"
+    if MODEL_TYPE == "standard":
+        LOGGER.info("Loading Standard VieNeu-TTS components (NeuCodec ONNX decoder via onnxruntime)...")
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+        model_path = hf_hub_download(repo_id=NEUCODEC_ONNX_REPO, filename="model.onnx")
+        NEUCODEC_DECODER = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        LOGGER.info("NeuCodec ONNX decoder loaded from %s", model_path)
+        VIENEU_MODEL = True  # Sentinel to indicate components are loaded
+    else:
+        from vieneu.turbo import TurboVieNeuTTS, BaseVieneuTTS
 
-    # Load only the ONNX codec (decoder + encoder)
-    model._load_decoder(CODEC_REPO, "vieneu_decoder.onnx", "cpu", None)
-    model._load_encoder(CODEC_REPO, "vieneu_encoder.onnx", "cpu", None)
+        LOGGER.info("Loading VieNeu-TTS Turbo components (codec + phonemizer + voices, NO backbone)...")
 
-    VIENEU_MODEL = model
+        # Construct model without loading backbone — call BaseVieneuTTS.__init__
+        # then load only decoder, encoder, and voices.
+        model = TurboVieNeuTTS.__new__(TurboVieNeuTTS)
+        BaseVieneuTTS.__init__(model)
+        model.backbone = None
+        model.decoder_sess = None
+        model.encoder_sess = None
+        model._is_onnx_codec = True
+        model.max_context = 4096
+        model.device = "cpu"
+
+        # Load only the ONNX codec (decoder + encoder)
+        model._load_decoder(CODEC_REPO, "vieneu_decoder.onnx", "cpu", None)
+        model._load_encoder(CODEC_REPO, "vieneu_encoder.onnx", "cpu", None)
+
+        VIENEU_MODEL = model
 
     elapsed = time.time() - start_time
-    LOGGER.info("VieNeu components loaded in %.1fs", elapsed)
+    LOGGER.info("VieNeu components loaded in %.1fs (model_type=%s)", elapsed, MODEL_TYPE)
 
 
 def load_turbo_voice_embeddings():
@@ -194,7 +213,10 @@ def load_turbo_voice_embeddings():
                 if emb.shape[0] == 128:
                     TURBO_VOICE_EMBEDDINGS[name] = emb[np.newaxis, :]
 
-        if default_name and default_name in TURBO_VOICE_EMBEDDINGS:
+        # Config override takes priority, then voices.json default, then first preset
+        if DEFAULT_VOICE_CONFIG and DEFAULT_VOICE_CONFIG in TURBO_VOICE_EMBEDDINGS:
+            DEFAULT_TURBO_EMBEDDING = TURBO_VOICE_EMBEDDINGS[DEFAULT_VOICE_CONFIG]
+        elif default_name and default_name in TURBO_VOICE_EMBEDDINGS:
             DEFAULT_TURBO_EMBEDDING = TURBO_VOICE_EMBEDDINGS[default_name]
         elif TURBO_VOICE_EMBEDDINGS:
             DEFAULT_TURBO_EMBEDDING = next(iter(TURBO_VOICE_EMBEDDINGS.values()))
@@ -202,6 +224,47 @@ def load_turbo_voice_embeddings():
         LOGGER.info("Loaded %d turbo voice embeddings", len(TURBO_VOICE_EMBEDDINGS))
     except Exception as e:
         LOGGER.warning("Could not load turbo voice embeddings: %s", e)
+
+
+def load_standard_voice_presets():
+    """Load voice presets (integer code sequences + reference text) for the standard model."""
+    global STANDARD_VOICE_PRESETS, DEFAULT_STANDARD_VOICE
+
+    import json
+    from huggingface_hub import hf_hub_download
+
+    try:
+        voices_path = hf_hub_download(repo_id=STANDARD_REPO, filename="voices.json")
+        with open(voices_path, 'r', encoding='utf-8') as f:
+            voices_data = json.load(f)
+
+        default_name = voices_data.get("default_voice", "")
+        presets = voices_data.get("presets", {})
+
+        for name, data in presets.items():
+            codes = data.get("codes", [])
+            text = data.get("text", "")
+            description = data.get("description", name)
+            # Standard voices have integer code sequences (not floats)
+            if codes and isinstance(codes[0], int):
+                STANDARD_VOICE_PRESETS[name] = {
+                    "codes": codes,
+                    "text": text,
+                    "description": description,
+                }
+
+        # Config override takes priority, then voices.json default, then first preset
+        if DEFAULT_VOICE_CONFIG and DEFAULT_VOICE_CONFIG in STANDARD_VOICE_PRESETS:
+            DEFAULT_STANDARD_VOICE = DEFAULT_VOICE_CONFIG
+        elif default_name and default_name in STANDARD_VOICE_PRESETS:
+            DEFAULT_STANDARD_VOICE = default_name
+        elif STANDARD_VOICE_PRESETS:
+            DEFAULT_STANDARD_VOICE = next(iter(STANDARD_VOICE_PRESETS))
+
+        LOGGER.info("Loaded %d standard voice presets (default=%s)",
+                    len(STANDARD_VOICE_PRESETS), DEFAULT_STANDARD_VOICE)
+    except Exception as e:
+        LOGGER.warning("Could not load standard voice presets: %s", e)
 
 
 def find_turbo_embedding(voice_id: Optional[str] = None) -> Optional[np.ndarray]:
@@ -224,15 +287,26 @@ def find_turbo_embedding(voice_id: Optional[str] = None) -> Optional[np.ndarray]
 
 
 def discover_voices():
-    """Populate available voices from the turbo voice embeddings."""
-    global AVAILABLE_VOICES, TURBO_VOICE_EMBEDDINGS
+    """Populate available voices from the loaded voice data."""
+    global AVAILABLE_VOICES
 
-    if TURBO_VOICE_EMBEDDINGS:
-        AVAILABLE_VOICES = [{"id": name, "name": name} for name in TURBO_VOICE_EMBEDDINGS]
-        LOGGER.info("Discovered %d turbo voices", len(AVAILABLE_VOICES))
+    if MODEL_TYPE == "standard":
+        if STANDARD_VOICE_PRESETS:
+            AVAILABLE_VOICES = [
+                {"id": name, "name": data.get("description", name)}
+                for name, data in STANDARD_VOICE_PRESETS.items()
+            ]
+            LOGGER.info("Discovered %d standard voices", len(AVAILABLE_VOICES))
+        else:
+            AVAILABLE_VOICES = [{"id": "", "name": "Default"}]
+            LOGGER.info("No standard voices found, using default")
     else:
-        AVAILABLE_VOICES = [{"id": "", "name": "Default"}]
-        LOGGER.info("No turbo voices found, using default")
+        if TURBO_VOICE_EMBEDDINGS:
+            AVAILABLE_VOICES = [{"id": name, "name": name} for name in TURBO_VOICE_EMBEDDINGS]
+            LOGGER.info("Discovered %d turbo voices", len(AVAILABLE_VOICES))
+        else:
+            AVAILABLE_VOICES = [{"id": "", "name": "Default"}]
+            LOGGER.info("No turbo voices found, using default")
 
 
 def float32_to_pcm16(audio_float):
@@ -243,28 +317,65 @@ def float32_to_pcm16(audio_float):
 
 
 def build_prompt(text: str, voice_id: Optional[str] = None) -> tuple[str, Optional[np.ndarray]]:
-    """Build the v2 Turbo LLM prompt for speech generation.
+    """Build the LLM prompt for speech generation.
 
-    Returns tuple of (prompt_string, voice_embedding).
-    The v2 Turbo model uses <|speaker_16|> token + phonemized text,
-    with voice identity handled via embedding to the ONNX decoder.
+    Returns tuple of (prompt_string, voice_embedding_or_None).
+    - Turbo: uses <|speaker_16|> token + phonemized text, voice via embedding.
+    - Standard: uses chat-style prompt with reference codes + phonemized ref + target text.
     """
+    if MODEL_TYPE == "standard":
+        return _build_standard_prompt(text, voice_id)
+    else:
+        return _build_turbo_prompt(text, voice_id)
+
+
+def _build_turbo_prompt(text: str, voice_id: Optional[str] = None) -> tuple[str, Optional[np.ndarray]]:
+    """Build v2 Turbo prompt."""
     from vieneu_utils.phonemize_text import phonemize_text
 
-    # Phonemize using the sea_g2p pipeline (includes normalization)
     phonemes = phonemize_text(text)
 
-    # V2 Turbo prompt format: speaker token + phonemes
     prompt = (
         f"<|speaker_16|>"
         f"<|TEXT_PROMPT_START|>{phonemes}<|TEXT_PROMPT_END|>"
         f"<|SPEECH_GENERATION_START|>"
     )
 
-    # Get the turbo voice embedding for the ONNX decoder
     voice_embedding = find_turbo_embedding(voice_id)
-
     return prompt, voice_embedding
+
+
+def _build_standard_prompt(text: str, voice_id: Optional[str] = None) -> tuple[str, None]:
+    """Build standard model prompt with reference voice codes and phonemized text."""
+    from vieneu_utils.phonemize_text import phonemize_with_dict
+
+    # Resolve voice preset
+    voice_name = voice_id
+    if not voice_name or voice_name not in STANDARD_VOICE_PRESETS:
+        voice_name = DEFAULT_STANDARD_VOICE
+
+    if not voice_name or voice_name not in STANDARD_VOICE_PRESETS:
+        raise ValueError("No voice preset available for standard model")
+
+    voice_data = STANDARD_VOICE_PRESETS[voice_name]
+    ref_codes = voice_data["codes"]
+    ref_text = voice_data["text"]
+
+    # Phonemize reference text and target text
+    ref_phonemes = phonemize_with_dict(ref_text)
+    target_phonemes = phonemize_with_dict(text)
+
+    # Build reference codes string
+    codes_str = "".join(f"<|speech_{idx}|>" for idx in ref_codes)
+
+    # Standard prompt format (chat-style, matching the official VieNeu-TTS standard engine)
+    prompt = (
+        f"user: Convert the text to speech:"
+        f"<|TEXT_PROMPT_START|>{ref_phonemes} {target_phonemes}<|TEXT_PROMPT_END|>\n"
+        f"assistant:<|SPEECH_GENERATION_START|>{codes_str}"
+    )
+
+    return prompt, None
 
 
 async def generate_speech_tokens_via_lm_studio(prompt: str) -> list[int]:
@@ -272,16 +383,28 @@ async def generate_speech_tokens_via_lm_studio(prompt: str) -> list[int]:
 
     completions_url = f"{LM_STUDIO_URL}/v1/completions"
 
-    payload = {
-        "prompt": prompt,
-        "max_tokens": 1024,
-        "temperature": 0.4,
-        "top_k": 50,
-        "top_p": 0.95,
-        "repeat_penalty": 1.15,
-        "stop": ["<|SPEECH_GENERATION_END|>"],
-        "stream": False,
-    }
+    if MODEL_TYPE == "standard":
+        # Standard model: larger context, slightly different generation params
+        payload = {
+            "prompt": prompt,
+            "max_tokens": 2048,
+            "temperature": 1.0,
+            "top_k": 50,
+            "stop": ["<|SPEECH_GENERATION_END|>"],
+            "stream": False,
+        }
+    else:
+        # Turbo model
+        payload = {
+            "prompt": prompt,
+            "max_tokens": 2048,
+            "temperature": 0.4,
+            "top_k": 50,
+            "top_p": 0.95,
+            "repeat_penalty": 1.15,
+            "stop": ["<|SPEECH_GENERATION_END|>"],
+            "stream": False,
+        }
 
     if LM_STUDIO_MODEL:
         payload["model"] = LM_STUDIO_MODEL
@@ -304,12 +427,20 @@ async def generate_speech_tokens_via_lm_studio(prompt: str) -> list[int]:
 
 
 def decode_speech_tokens(speech_ids: list[int], voice_embedding: Optional[np.ndarray] = None) -> np.ndarray:
-    """Decode speech token IDs to audio waveform using VieNeu codec."""
-    global VIENEU_MODEL
+    """Decode speech token IDs to audio waveform using the appropriate codec."""
+    global VIENEU_MODEL, NEUCODEC_DECODER
 
-    decode_str = "".join(f"<|speech_{tid}|>" for tid in speech_ids)
-    audio = VIENEU_MODEL._decode(decode_str, voice_embedding)
-    return audio
+    if MODEL_TYPE == "standard":
+        # NeuCodec ONNX decoder: input "codes" shape [B, 1, T] int32, output audio [B, 1, T_audio]
+        codes = np.array(speech_ids, dtype=np.int32)[np.newaxis, np.newaxis, :]
+        input_name = NEUCODEC_DECODER.get_inputs()[0].name
+        recon = NEUCODEC_DECODER.run(None, {input_name: codes})[0]
+        return recon[0, 0, :]
+    else:
+        # Turbo: VieNeu-Codec ONNX decoder with voice embedding
+        decode_str = "".join(f"<|speech_{tid}|>" for tid in speech_ids)
+        audio = VIENEU_MODEL._decode(decode_str, voice_embedding)
+        return audio
 
 
 @asynccontextmanager
@@ -317,14 +448,18 @@ async def lifespan(app: FastAPI):
     """Pre-load VieNeu components and verify LM Studio connectivity at startup."""
     LOGGER.info("=" * 60)
     LOGGER.info("PRE-LOADING VIENEU-GGUF-TTS COMPONENTS AT STARTUP")
+    LOGGER.info("Model type: %s", MODEL_TYPE)
     LOGGER.info("LM Studio URL: %s", LM_STUDIO_URL)
     LOGGER.info("=" * 60)
 
     try:
         load_components()
-        load_turbo_voice_embeddings()
+        if MODEL_TYPE == "standard":
+            load_standard_voice_presets()
+        else:
+            load_turbo_voice_embeddings()
         discover_voices()
-        LOGGER.info("[OK] VieNeu components loaded successfully")
+        LOGGER.info("[OK] VieNeu components loaded successfully (model_type=%s)", MODEL_TYPE)
     except Exception as e:
         LOGGER.error("[FAIL] Failed to load VieNeu components: %s", e, exc_info=True)
         _append_fault_log(f"Startup failure: {e}\n" + traceback.format_exc())
@@ -348,13 +483,15 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cleanup
-    global VIENEU_MODEL
+    global VIENEU_MODEL, NEUCODEC_DECODER
     if VIENEU_MODEL is not None:
         try:
-            VIENEU_MODEL.close()
+            if hasattr(VIENEU_MODEL, 'close'):
+                VIENEU_MODEL.close()
         except Exception:
             pass
         VIENEU_MODEL = None
+    NEUCODEC_DECODER = None
 
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_INSTALL_VERSION, lifespan=lifespan)
@@ -393,7 +530,7 @@ async def tts_endpoint(req: TTSRequest):
 
 async def _synthesize_audio(text: str, voice_id: Optional[str] = None):
     """Synthesize audio from text via LM Studio and return as WAV."""
-    global VIENEU_MODEL
+    global VIENEU_MODEL, NEUCODEC_DECODER
 
     if VIENEU_MODEL is None:
         raise HTTPException(status_code=503, detail="Model components not loaded yet")
@@ -483,6 +620,7 @@ async def get_info():
         "github_url": get_config_value(SERVICE_CONFIG, 'github_url', ''),
         "service_author": get_config_value(SERVICE_CONFIG, 'service_author', ''),
         "lm_studio_url": LM_STUDIO_URL,
+        "model_type": MODEL_TYPE,
         "available_voices": [v["id"] for v in AVAILABLE_VOICES] if AVAILABLE_VOICES else ["default"],
     }
     return JSONResponse(content=info)
@@ -508,7 +646,8 @@ async def shutdown():
 if __name__ == "__main__":
     host = "127.0.0.1" if get_config_value(SERVICE_CONFIG, 'local_only', 'true') == 'true' else "0.0.0.0"
 
-    LOGGER.info("Starting %s service on %s:%s (debug_mode=%s)", SERVICE_NAME, host, SERVICE_PORT, DEBUG_MODE)
+    LOGGER.info("Starting %s service on %s:%s (debug_mode=%s, model_type=%s)",
+                SERVICE_NAME, host, SERVICE_PORT, DEBUG_MODE, MODEL_TYPE)
     LOGGER.info("LM Studio backend: %s", LM_STUDIO_URL)
     LOGGER.info("Configuration: %s", SERVICE_CONFIG)
 

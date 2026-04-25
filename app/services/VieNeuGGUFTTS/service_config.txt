@@ -8,4 +8,6 @@ venv_name|ugt_vieneugguf|
 local_only|true|
 service_install_version|1|
 lm_studio_url|http://192.168.1.140:1234|
-lm_studio_model|vieneu-tts-v2-turbo|
+lm_studio_model|vieneu-tts|
+model_type|standard|
+default_voice|Ngoc|
