@@ -105,6 +105,13 @@
                       ToolTip="Target language for translation"
                       SelectionChanged="TargetLangComboBox_SelectionChanged"/>
 
+            <TextBlock Text="Model:" Foreground="#AAFFFFFF" FontSize="10" Margin="4,2,0,1"/>
+            <ComboBox x:Name="genericLlmModelComboBox" Margin="2,0,2,2" FontSize="10"
+                      Height="22" IsEditable="False"
+                      ToolTip="Generic LLM OCR model from the OpenAI-compatible /v1/models endpoint"
+                      DropDownOpened="GenericLlmModelComboBox_DropDownOpened"
+                      SelectionChanged="GenericLlmModelComboBox_SelectionChanged"/>
+
             <!-- Separator -->
             <Rectangle Height="1" Fill="#40FFFFFF" Margin="4,3"/>
 
@@ -154,6 +161,15 @@
                       Margin="4,2" FontSize="11"
                       ToolTip="Generic LLM OCR: focus only on menu items, item descriptions, and battle commands"
                       Checked="GenericLlmMenuItemsFilterCheckBox_Changed" Unchecked="GenericLlmMenuItemsFilterCheckBox_Changed"/>
+
+            <!-- Translation cache purge -->
+            <DockPanel Margin="1,2">
+                <TextBlock x:Name="cacheCountLabel" Text="" Foreground="#AAFFFFFF" FontSize="9"
+                           DockPanel.Dock="Bottom" HorizontalAlignment="Center" Margin="0,1,0,0"/>
+                <Button x:Name="purgeCacheButton" Content="Purge Cache" Style="{StaticResource ToolbarButtonStyle}"
+                        Click="PurgeCacheButton_Click"
+                        ToolTip="Remove translation cache entries with fewer than 5 hits"/>
+            </DockPanel>
 
             <!-- Separator -->
             <Rectangle Height="1" Fill="#40FFFFFF" Margin="4,3"/>

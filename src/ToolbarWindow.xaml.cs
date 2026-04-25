@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -60,9 +62,16 @@ namespace UGTLive
             ("Vietnamese", "vi"),
         };
 
+        private const string GENERIC_LLM_MODELS_LOADING_ITEM = "Loading models...";
+
         public static ToolbarWindow? Instance { get; private set; }
 
         private bool _isInitialized = false;
+        private bool _hasLoadedGenericLlmModels = false;
+        private bool _isGenericLlmModelsLoading = false;
+        private bool _suppressGenericLlmModelSelectionChanged = false;
+        private string _lastGenericLlmModelApiBase = string.Empty;
+        private string _lastGenericLlmModelApiKey = string.Empty;
 
         public ToolbarWindow()
         {
@@ -93,10 +102,12 @@ namespace UGTLive
             // SetExcludeFromCapture();
         }
 
-        private void ToolbarWindow_Loaded(object sender, RoutedEventArgs e)
+        private async void ToolbarWindow_Loaded(object sender, RoutedEventArgs e)
         {
             SyncTargetWindow();
+            SyncGenericLlmModel(ConfigManager.Instance.GetGenericLlmOcrModel());
             _isInitialized = true;
+            await RefreshCacheStatsAsync();
         }
 
         // --- Capture exclusion ---
@@ -419,6 +430,116 @@ namespace UGTLive
             }
         }
 
+        private async void GenericLlmModelComboBox_DropDownOpened(object sender, EventArgs e)
+        {
+            await RefreshGenericLlmModelsAsync();
+        }
+
+        private void GenericLlmModelComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_isInitialized || _suppressGenericLlmModelSelectionChanged)
+            {
+                return;
+            }
+
+            string selectedModel = (genericLlmModelComboBox.SelectedItem as string ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(selectedModel))
+            {
+                return;
+            }
+
+            MainWindow.Instance?.HandleGenericLlmOcrModelChanged(selectedModel);
+        }
+
+        private async Task RefreshGenericLlmModelsAsync()
+        {
+            if (_isGenericLlmModelsLoading)
+            {
+                return;
+            }
+
+            string apiBase = ConfigManager.Instance.GetGenericLlmOcrApiBase();
+            string apiKey = ConfigManager.Instance.GetGenericLlmOcrApiKey();
+            bool configChanged = !string.Equals(apiBase, _lastGenericLlmModelApiBase, StringComparison.Ordinal)
+                || !string.Equals(apiKey, _lastGenericLlmModelApiKey, StringComparison.Ordinal);
+
+            if (_hasLoadedGenericLlmModels && !configChanged)
+            {
+                return;
+            }
+
+            string selectedModel = (genericLlmModelComboBox.SelectedItem as string ?? ConfigManager.Instance.GetGenericLlmOcrModel()).Trim();
+
+            _isGenericLlmModelsLoading = true;
+            _suppressGenericLlmModelSelectionChanged = true;
+            genericLlmModelComboBox.IsEnabled = false;
+            genericLlmModelComboBox.Items.Clear();
+            genericLlmModelComboBox.Items.Add(GENERIC_LLM_MODELS_LOADING_ITEM);
+            genericLlmModelComboBox.SelectedIndex = 0;
+
+            try
+            {
+                List<string> models = await OpenAiCompatibleModelClient.FetchModelsAsync(apiBase, apiKey);
+                _lastGenericLlmModelApiBase = apiBase;
+                _lastGenericLlmModelApiKey = apiKey;
+                _hasLoadedGenericLlmModels = true;
+                SetGenericLlmModelItems(models, selectedModel);
+            }
+            catch (Exception ex)
+            {
+                _hasLoadedGenericLlmModels = false;
+                SetGenericLlmModelItems(Array.Empty<string>(), selectedModel);
+                Console.WriteLine($"Error fetching Generic LLM OCR models: {ex.Message}");
+            }
+            finally
+            {
+                genericLlmModelComboBox.IsEnabled = true;
+                _suppressGenericLlmModelSelectionChanged = false;
+                genericLlmModelComboBox.ToolTip = genericLlmModelComboBox.SelectedItem as string
+                    ?? "Generic LLM OCR model from the OpenAI-compatible /v1/models endpoint";
+                _isGenericLlmModelsLoading = false;
+            }
+        }
+
+        private void SetGenericLlmModelItems(IEnumerable<string> models, string selectedModel)
+        {
+            string normalizedSelectedModel = (selectedModel ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedSelectedModel))
+            {
+                normalizedSelectedModel = ConfigManager.Instance.GetGenericLlmOcrModel();
+            }
+
+            List<string> items = models
+                .Where(model => !string.IsNullOrWhiteSpace(model))
+                .Select(model => model.Trim())
+                .Where(model => !string.Equals(model, GENERIC_LLM_MODELS_LOADING_ITEM, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(model => model, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (!string.IsNullOrWhiteSpace(normalizedSelectedModel)
+                && !items.Contains(normalizedSelectedModel, StringComparer.OrdinalIgnoreCase))
+            {
+                items.Insert(0, normalizedSelectedModel);
+            }
+
+            if (items.Count == 0)
+            {
+                items.Add(ConfigManager.Instance.GetGenericLlmOcrModel());
+            }
+
+            genericLlmModelComboBox.Items.Clear();
+            foreach (string item in items)
+            {
+                genericLlmModelComboBox.Items.Add(item);
+            }
+
+            string selectedItem = items.FirstOrDefault(item => string.Equals(item, normalizedSelectedModel, StringComparison.OrdinalIgnoreCase))
+                ?? items[0];
+            genericLlmModelComboBox.SelectedItem = selectedItem;
+            genericLlmModelComboBox.ToolTip = selectedItem;
+        }
+
         /// <summary>
         /// Initialize the target window combo box from saved config.
         /// </summary>
@@ -517,6 +638,91 @@ namespace UGTLive
             }
             targetLangComboBox.SelectedIndex = selectedIndex;
             _isInitialized = true;
+        }
+
+        public void SyncGenericLlmModel(string model)
+        {
+            _suppressGenericLlmModelSelectionChanged = true;
+            try
+            {
+                List<string> currentItems = genericLlmModelComboBox.Items.OfType<string>().ToList();
+                SetGenericLlmModelItems(currentItems, model);
+            }
+            finally
+            {
+                _suppressGenericLlmModelSelectionChanged = false;
+            }
+        }
+
+        // --- Translation cache purge ---
+
+        private static readonly System.Net.Http.HttpClient _cacheHttpClient = new System.Net.Http.HttpClient()
+        {
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+
+        private async void PurgeCacheButton_Click(object sender, RoutedEventArgs e)
+        {
+            purgeCacheButton.IsEnabled = false;
+            cacheCountLabel.Text = "Purging...";
+            try
+            {
+                var service = PythonServicesManager.Instance.GetServiceByName("Generic LLM OCR");
+                if (service == null || !service.IsRunning)
+                {
+                    cacheCountLabel.Text = "Service not running";
+                    return;
+                }
+
+                string baseUrl = $"{service.ServerUrl}:{service.Port}";
+                var response = await _cacheHttpClient.PostAsync($"{baseUrl}/translation_cache_purge", null);
+                response.EnsureSuccessStatusCode();
+                string json = await response.Content.ReadAsStringAsync();
+                var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                int removed = root.GetProperty("removed").GetInt32();
+                int totalAfter = root.GetProperty("total_after").GetInt32();
+                cacheCountLabel.Text = $"Removed {removed}, now {totalAfter}";
+                Console.WriteLine($"Translation cache purge: removed {removed}, remaining {totalAfter}");
+            }
+            catch (Exception ex)
+            {
+                cacheCountLabel.Text = "Error";
+                Console.WriteLine($"Cache purge failed: {ex.Message}");
+            }
+            finally
+            {
+                purgeCacheButton.IsEnabled = true;
+            }
+        }
+
+        public async Task RefreshCacheStatsAsync()
+        {
+            try
+            {
+                var service = PythonServicesManager.Instance.GetServiceByName("Generic LLM OCR");
+                if (service == null || !service.IsRunning)
+                {
+                    cacheCountLabel.Text = "";
+                    return;
+                }
+
+                string baseUrl = $"{service.ServerUrl}:{service.Port}";
+                var response = await _cacheHttpClient.GetAsync($"{baseUrl}/translation_cache_stats");
+                response.EnsureSuccessStatusCode();
+                string json = await response.Content.ReadAsStringAsync();
+                var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                int total = root.GetProperty("total").GetInt32();
+                int wouldRemain = root.GetProperty("would_remain").GetInt32();
+                cacheCountLabel.Text = $"{total} items → {wouldRemain}";
+            }
+            catch
+            {
+                cacheCountLabel.Text = "";
+            }
         }
     }
 }

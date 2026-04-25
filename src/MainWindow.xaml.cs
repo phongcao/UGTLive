@@ -5610,6 +5610,37 @@ namespace UGTLive
             Console.WriteLine($"Generic LLM OCR menu items filter {(isEnabled ? "enabled" : "disabled")}");
         }
 
+        public void HandleGenericLlmOcrModelChanged(string model)
+        {
+            string normalizedModel = (model ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedModel))
+            {
+                return;
+            }
+
+            ConfigManager.Instance.SetGenericLlmOcrModel(normalizedModel);
+            _toolbarWindow?.SyncGenericLlmModel(normalizedModel);
+
+            if (SettingsWindow.IsOpenAndVisible())
+            {
+                SettingsWindow.Instance.SyncGenericLlmOcrModel(normalizedModel);
+            }
+
+            if (string.Equals(GetSelectedOcrMethod(), "Generic LLM OCR", StringComparison.OrdinalIgnoreCase))
+            {
+                Logic.Instance.ResetHash();
+                Logic.Instance.ClearAllTextObjects();
+
+                if (GetIsStarted())
+                {
+                    SetOCRCheckIsWanted(true);
+                }
+            }
+
+            BringToFront();
+            Console.WriteLine($"Generic LLM OCR model changed to: {normalizedModel}");
+        }
+
         public void HandleSourceLanguageChanged(string langCode)
         {
             ConfigManager.Instance.SetSourceLanguage(langCode);
@@ -6019,6 +6050,7 @@ namespace UGTLive
             _toolbarWindow?.SyncGenericLlmMenuItemsFilter(ConfigManager.Instance.IsGenericLlmOcrMenuItemsFilterEnabled());
             _toolbarWindow?.SyncSourceLanguage(ConfigManager.Instance.GetSourceLanguage());
             _toolbarWindow?.SyncTargetLanguage(ConfigManager.Instance.GetGenericLlmOcrTargetLanguage());
+            _toolbarWindow?.SyncGenericLlmModel(ConfigManager.Instance.GetGenericLlmOcrModel());
         }
 
         private void UpdateToolbarPosition()

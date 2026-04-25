@@ -113,6 +113,14 @@ namespace UGTLive
             dialogTtsCheckBox.IsChecked = enabled;
             _isInitializing = previousInitializing;
         }
+
+        public void SyncGenericLlmOcrModel(string model)
+        {
+            bool previousInitializing = _isInitializing;
+            _isInitializing = true;
+            genericLlmOcrModelTextBox.Text = model;
+            _isInitializing = previousInitializing;
+        }
         
         public SettingsWindow()
         {
@@ -1148,8 +1156,7 @@ namespace UGTLive
             string model = genericLlmOcrModelTextBox.Text.Trim();
             if (!string.IsNullOrWhiteSpace(model))
             {
-                ConfigManager.Instance.SetGenericLlmOcrModel(model);
-                RefreshAfterGenericLlmOcrSettingChange();
+                MainWindow.Instance.HandleGenericLlmOcrModelChanged(model);
             }
         }
 
@@ -3089,56 +3096,17 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
             {
                 string llamacppUrl = ConfigManager.Instance.GetLlamaCppUrl();
                 string llamacppPort = ConfigManager.Instance.GetLlamaCppPort();
-                
-                // Correctly format the URL
-                if (!llamacppUrl.StartsWith("http://") && !llamacppUrl.StartsWith("https://"))
+
+                string apiBase = $"{llamacppUrl}:{llamacppPort}";
+                Console.WriteLine($"Fetching models from URL: {OpenAiCompatibleModelClient.BuildModelsEndpoint(apiBase)}");
+
+                List<string> models = await OpenAiCompatibleModelClient.FetchModelsAsync(apiBase);
+                foreach (string model in models)
                 {
-                    llamacppUrl = "http://" + llamacppUrl;
+                    Console.WriteLine($"Found available model: {model}");
                 }
-                
-                // OpenAI-compatible /v1/models endpoint
-                string apiUrl = $"{llamacppUrl}:{llamacppPort}/v1/models";
-                Console.WriteLine($"Fetching models from URL: {apiUrl}");
-                
-                using (var client = new HttpClient())
-                {
-                    client.Timeout = TimeSpan.FromSeconds(30);
-                    HttpResponseMessage response = await client.GetAsync(apiUrl);
-                    
-                    if (response.IsSuccessStatusCode)
-                    {
-                        string jsonResponse = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"Response from llama.cpp models API: {jsonResponse}");
-                        
-                        using JsonDocument doc = JsonDocument.Parse(jsonResponse);
-                        List<string> models = new List<string>();
-                        
-                        // OpenAI format: { "object": "list", "data": [{ "id": "model-name", ... }] }
-                        if (doc.RootElement.TryGetProperty("data", out JsonElement dataElement))
-                        {
-                            foreach (JsonElement modelElement in dataElement.EnumerateArray())
-                            {
-                                if (modelElement.TryGetProperty("id", out JsonElement idElement))
-                                {
-                                    string modelId = idElement.GetString() ?? "";
-                                    if (!string.IsNullOrWhiteSpace(modelId))
-                                    {
-                                        models.Add(modelId);
-                                        Console.WriteLine($"Found available model: {modelId}");
-                                    }
-                                }
-                            }
-                        }
-                        
-                        return models.OrderBy(m => m).ToList();
-                    }
-                    else
-                    {
-                        string errorMessage = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"llama.cpp API error: {response.StatusCode}, {errorMessage}");
-                        return new List<string>();
-                    }
-                }
+
+                return models;
             }
             catch (Exception ex)
             {

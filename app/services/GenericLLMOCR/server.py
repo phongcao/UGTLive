@@ -111,7 +111,9 @@ PROMPT_MENU_ITEMS_FILTER = (
 )
 
 PROMPT_OCR_ONLY = (
-    "You are an OCR engine. Detect every text region in the image.\n"
+    "You are an OCR engine. Detect every text region in the image except standalone raw numbers or numeric-only text regions.\n"
+    "Ignore numeric-only text such as 123, 12/50, 99%, 03:21, damage values, counters, stat-only readouts, and other HUD-style number displays.\n"
+    "Keep numbers only when they are part of a larger phrase or sentence whose wording matters.\n"
     "For EACH text region output EXACTLY one line in this format:\n"
     "BBOX:[x1,y1,x2,y2]|TEXT:<the text>\n"
     "where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner in pixel coordinates.\n"
@@ -122,7 +124,9 @@ PROMPT_OCR_ONLY = (
 )
 
 PROMPT_OCR_TRANSLATE = (
-    "You are an OCR and translation engine. Detect every text region in the image.\n"
+    "You are an OCR and translation engine. Detect every text region in the image except standalone raw numbers or numeric-only text regions.\n"
+    "Ignore numeric-only text such as 123, 12/50, 99%, 03:21, damage values, counters, stat-only readouts, and other HUD-style number displays.\n"
+    "Keep numbers only when they are part of a larger phrase or sentence whose wording matters.\n"
     "First infer the likely overall context of the image and use it internally to choose accurate terminology and tone.\n"
     "For EACH text region output EXACTLY one line in this format:\n"
     "BBOX:[x1,y1,x2,y2]|TEXT:<translated text>\n"
@@ -1706,6 +1710,55 @@ async def get_info():
             "service_author": get_config_value(SERVICE_CONFIG, "service_author", ""),
             "color_analysis_available": _COLOR_ANALYSIS_IMPORT_ERROR is None,
             "color_analysis_error": str(_COLOR_ANALYSIS_IMPORT_ERROR) if _COLOR_ANALYSIS_IMPORT_ERROR else "",
+        }
+    )
+
+
+@app.get("/translation_cache_stats")
+async def translation_cache_stats():
+    min_hits = 5
+    with _TRANSLATION_CACHE._lock:
+        total = len(_TRANSLATION_CACHE._cache)
+        would_remove = sum(
+            1 for entry in _TRANSLATION_CACHE._cache.values()
+            if entry.get("hits", 0) < min_hits
+        )
+    return JSONResponse(
+        content={
+            "status": "success",
+            "total": total,
+            "would_remove": would_remove,
+            "would_remain": total - would_remove,
+            "min_hits_threshold": min_hits,
+        }
+    )
+
+
+@app.post("/translation_cache_purge")
+async def translation_cache_purge():
+    min_hits = 5
+    with _TRANSLATION_CACHE._lock:
+        total_before = len(_TRANSLATION_CACHE._cache)
+        keys_to_remove = [
+            key for key, entry in _TRANSLATION_CACHE._cache.items()
+            if entry.get("hits", 0) < min_hits
+        ]
+        for key in keys_to_remove:
+            del _TRANSLATION_CACHE._cache[key]
+        _TRANSLATION_CACHE._dirty = True
+        total_after = len(_TRANSLATION_CACHE._cache)
+    _TRANSLATION_CACHE.save()
+    LOGGER.info(
+        "Translation cache purged: removed %d entries (hits < %d), %d → %d",
+        len(keys_to_remove), min_hits, total_before, total_after,
+    )
+    return JSONResponse(
+        content={
+            "status": "success",
+            "removed": len(keys_to_remove),
+            "total_before": total_before,
+            "total_after": total_after,
+            "min_hits_threshold": min_hits,
         }
     )
 
