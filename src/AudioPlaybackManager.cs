@@ -298,7 +298,6 @@ namespace UGTLive
             }
 
             Qwen3TtsService.Instance.StopActivePlayback();
-            VieNeuTtsService.Instance.StopActivePlayback();
             VieNeuGgufTtsService.Instance.StopActivePlayback();
             
             // Update current playing ID and transition state
@@ -369,12 +368,7 @@ namespace UGTLive
                 {
                     AudioPreloadService.Instance.CancelAllPreloads();
 
-                    return serviceName == "VieNeu-TTS"
-                        ? await VieNeuTtsService.Instance.SpeakTextAndWaitAsync(
-                            filteredText,
-                            ConfigManager.Instance.GetVieNeuTtsVoice(),
-                            cancellationToken)
-                        : serviceName == "VieNeu-GGUF-TTS"
+                    return serviceName == "VieNeu-GGUF-TTS"
                         ? await VieNeuGgufTtsService.Instance.SpeakTextAndWaitAsync(
                             filteredText,
                             ConfigManager.Instance.GetVieNeuGgufTtsVoice(),
@@ -603,11 +597,7 @@ namespace UGTLive
                             }
 
                             bool success;
-                            if (streamingServiceName == "VieNeu-TTS")
-                            {
-                                success = await VieNeuTtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
-                            }
-                            else if (streamingServiceName == "VieNeu-GGUF-TTS")
+                            if (streamingServiceName == "VieNeu-GGUF-TTS")
                             {
                                 success = await VieNeuGgufTtsService.Instance.SpeakTextAndWaitAsync(textToSpeak, streamingVoice, cancellationToken);
                             }
@@ -742,11 +732,6 @@ namespace UGTLive
                 {
                     voice = ConfigManager.Instance.GetQwen3TtsVoice();
                 }
-                return true;
-            }
-
-            if (service == "VieNeu-TTS")
-            {
                 return true;
             }
 

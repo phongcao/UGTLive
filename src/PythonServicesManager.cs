@@ -123,7 +123,7 @@ namespace UGTLive
             return false;
         }
         
-        private static readonly string[] _priorityServices = { "Generic LLM OCR", "VieNeuTTS", "VieNeuGGUFTTS", "Qwen3TTS" };
+        private static readonly string[] _priorityServices = { "Generic LLM OCR", "VieNeuGGUFTTS", "Qwen3TTS" };
 
         /// <summary>
         /// Gets all discovered services, with priority services listed first

@@ -145,13 +145,6 @@ namespace UGTLive
                     voiceComboBox.Items.Add(new ComboBoxItem { Content = voice.Key, Tag = voice.Value });
                 }
             }
-            else if (SelectedService == "VieNeu-TTS")
-            {
-                foreach (var voice in VieNeuTtsService.AvailableVoices)
-                {
-                    voiceComboBox.Items.Add(new ComboBoxItem { Content = voice.Key, Tag = voice.Value });
-                }
-            }
             else if (SelectedService == "VieNeu-GGUF-TTS")
             {
                 foreach (var voice in VieNeuGgufTtsService.AvailableVoices)

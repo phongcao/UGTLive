@@ -1,9 +1,0 @@
-description|Vietnamese Text-to-Speech v2 Turbo with instant zero-shot voice cloning using VieNeu-TTS. Supports bilingual Vietnamese-English synthesis.|
-github_url|https://github.com/pnnbao97/VieNeu-TTS|
-service_author|Pham Nguyen Ngoc Bao|
-service_name|VieNeuTTS|
-port|5007|
-server_url|http://127.0.0.1|
-venv_name|ugt_vieneutts|
-local_only|true|
-service_install_version|2|

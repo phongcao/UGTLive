@@ -2742,7 +2742,6 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
                 bool isElevenLabsSelected = selectedService == "ElevenLabs";
                 bool isGoogleTtsSelected = selectedService == "Google Cloud TTS";
                 bool isQwen3TtsSelected = selectedService == "Qwen3-TTS";
-                bool isVieNeuTtsSelected = selectedService == "VieNeu-TTS";
                 bool isVieNeuGgufTtsSelected = selectedService == "VieNeu-GGUF-TTS";
                 
                 // Make sure the window is fully loaded and controls are initialized
@@ -2777,13 +2776,6 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
                 {
                     qwen3TtsVoiceLabel.Visibility = isQwen3TtsSelected ? Visibility.Visible : Visibility.Collapsed;
                     qwen3TtsVoiceComboBox.Visibility = isQwen3TtsSelected ? Visibility.Visible : Visibility.Collapsed;
-                }
-                
-                // Show/hide VieNeu-TTS-specific settings
-                if (vieneuTtsVoiceLabel != null && vieneuTtsVoiceComboBox != null)
-                {
-                    vieneuTtsVoiceLabel.Visibility = isVieNeuTtsSelected ? Visibility.Visible : Visibility.Collapsed;
-                    vieneuTtsVoiceComboBox.Visibility = isVieNeuTtsSelected ? Visibility.Visible : Visibility.Collapsed;
                 }
                 
                 // Show/hide VieNeu-GGUF-TTS-specific settings
@@ -2848,21 +2840,6 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
                             if (string.Equals(item.Tag?.ToString(), voiceId, StringComparison.OrdinalIgnoreCase))
                             {
                                 qwen3TtsVoiceComboBox.SelectedItem = item;
-                                break;
-                            }
-                        }
-                    }
-                }
-                else if (isVieNeuTtsSelected)
-                {
-                    if (vieneuTtsVoiceComboBox != null)
-                    {
-                        string voiceId = ConfigManager.Instance.GetVieNeuTtsVoice();
-                        foreach (ComboBoxItem item in vieneuTtsVoiceComboBox.Items)
-                        {
-                            if (string.Equals(item.Tag?.ToString(), voiceId, StringComparison.OrdinalIgnoreCase))
-                            {
-                                vieneuTtsVoiceComboBox.SelectedItem = item;
                                 break;
                             }
                         }
@@ -3739,26 +3716,6 @@ googleVisionKeepLinefeedsCheckBox.Visibility = glueVisibility;
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating Qwen3-TTS voice: {ex.Message}");
-            }
-        }
-
-        private void VieNeuTtsVoiceComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            try
-            {
-                if (_isInitializing)
-                    return;
-
-                if (vieneuTtsVoiceComboBox.SelectedItem is ComboBoxItem selectedItem)
-                {
-                    string voiceId = selectedItem.Tag?.ToString() ?? "";
-                    ConfigManager.Instance.SetVieNeuTtsVoice(voiceId);
-                    Console.WriteLine($"VieNeu-TTS voice set to: {selectedItem.Content} (ID: {voiceId})");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error updating VieNeu-TTS voice: {ex.Message}");
             }
         }
 

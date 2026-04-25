@@ -465,18 +465,9 @@ def benchmark_tts(
         def make_request(text: str) -> requests.Response:
             return requests.post(url, json={"text": text, "voice_id": voice}, timeout=120)
 
-    elif "vieneu" in tts_service.lower():
-        port = int(config.get("vieneu_tts_port", "5007"))
-        voice = config.get("vieneu_tts_voice", "Default")
-        url = f"http://127.0.0.1:{port}/tts"
-        service_label = f"VieNeuTTS (port={port}, voice={voice})"
-
-        def make_request(text: str) -> requests.Response:
-            return requests.post(url, json={"text": text, "voice_id": voice}, timeout=120)
-
     else:
         print(f"  SKIP: TTS service '{tts_service}' not supported by this harness.")
-        print("  Supported: Qwen3-TTS, VieNeu-TTS, VieNeuGGUF-TTS")
+        print("  Supported: Qwen3-TTS, VieNeuGGUF-TTS")
         return 0.0
 
     print(f"  TTS service: {service_label}")
@@ -585,7 +576,7 @@ def main():
     parser.add_argument("--target-lang", type=str, default=None, help="Target language (default: from config)")
     parser.add_argument("--tts-text", type=str, default=None, help="Override TTS text (instead of using OCR output)")
     parser.add_argument("--tts-service", type=str, default=None,
-                        help="Override TTS service (Qwen3-TTS, VieNeu-TTS, VieNeuGGUF-TTS)")
+                        help="Override TTS service (Qwen3-TTS, VieNeuGGUF-TTS)")
     parser.add_argument("--debug", action="store_true", default=False,
                         help="Save audio and log files to debug folder")
     args = parser.parse_args()
