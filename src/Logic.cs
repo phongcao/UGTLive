@@ -59,6 +59,8 @@ namespace UGTLive
         private byte[]? _lastGenericLlmOcrFrameHash = null;
         private readonly object _genericLlmFrameHashLock = new object();
         private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 1;
+        private const int GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_DIMENSION = 768;
+        private const int GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000;
 
         // Track the current capture position
         private int _currentCaptureX;
@@ -291,29 +293,11 @@ namespace UGTLive
             RefreshOCRStatusDisplay();
         }
 
-        private static string FormatGenericLlmOcrHashPreview(byte[]? hash)
-        {
-            if (hash == null || hash.Length == 0)
-            {
-                return "none";
-            }
-
-            int previewLength = Math.Min(4, hash.Length);
-            return BitConverter.ToString(hash, 0, previewLength).Replace("-", string.Empty);
-        }
-
         public void ResetHash([CallerMemberName] string caller = "")
         {
-            byte[]? previousFrameHash;
             lock (_genericLlmFrameHashLock)
             {
-                previousFrameHash = _lastGenericLlmOcrFrameHash;
                 _lastGenericLlmOcrFrameHash = null;
-            }
-
-            if (previousFrameHash != null && ConfigManager.Instance.GetLogExtraDebugStuff())
-            {
-                Log($"[GLLM HASH] reset caller={caller} overlaySession={_overlaySessionId} previousFrameHash={FormatGenericLlmOcrHashPreview(previousFrameHash)}");
             }
 
             // Force mismatch on next comparison by using a unique string
@@ -332,39 +316,39 @@ namespace UGTLive
             return new System.Drawing.Rectangle(0, 0, Math.Max(1, width), Math.Max(1, height));
         }
 
+        private static int GetGenericLlmOcrSampleCoordinate(int start, int length, int index, int divisions)
+        {
+            if (length <= 1)
+            {
+                return start;
+            }
+
+            long centeredPosition = ((2L * index) + 1L) * length;
+            int offset = (int)(centeredPosition / (2L * divisions));
+            return Math.Min(start + length - 1, start + offset);
+        }
+
         private byte[] ComputeGenericLlmOcrFrameHash(
-            byte[] imageBytes,
+            System.Drawing.Bitmap sourceBitmap,
             out System.Drawing.Rectangle comparisonRect,
             out System.Drawing.Size sourceSize)
         {
-            using var inputStream = new MemoryStream(imageBytes);
-            using var sourceBitmap = new System.Drawing.Bitmap(inputStream);
             sourceSize = sourceBitmap.Size;
             comparisonRect = GetGenericLlmOcrComparisonCropRect(sourceBitmap);
-            using var croppedBitmap = sourceBitmap.Clone(comparisonRect, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
 
-            const int targetWidth = 128;
-            const int targetHeight = 128;
-
-            using var downscaledBitmap = new System.Drawing.Bitmap(targetWidth, targetHeight, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-            using (var graphics = System.Drawing.Graphics.FromImage(downscaledBitmap))
-            {
-                graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-                graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
-                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
-                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
-                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
-                graphics.DrawImage(croppedBitmap, new System.Drawing.Rectangle(0, 0, targetWidth, targetHeight));
-            }
+            const int targetWidth = 64;
+            const int targetHeight = 64;
 
             byte[] luminanceBytes = new byte[targetWidth * targetHeight];
             int luminanceSum = 0;
             int index = 0;
             for (int y = 0; y < targetHeight; y++)
             {
+                int sampleY = GetGenericLlmOcrSampleCoordinate(comparisonRect.Y, comparisonRect.Height, y, targetHeight);
                 for (int x = 0; x < targetWidth; x++)
                 {
-                    System.Drawing.Color pixel = downscaledBitmap.GetPixel(x, y);
+                    int sampleX = GetGenericLlmOcrSampleCoordinate(comparisonRect.X, comparisonRect.Width, x, targetWidth);
+                    System.Drawing.Color pixel = sourceBitmap.GetPixel(sampleX, sampleY);
                     byte luminance = (byte)((pixel.R * 299 + pixel.G * 587 + pixel.B * 114) / 1000);
                     luminanceBytes[index++] = luminance;
                     luminanceSum += luminance;
@@ -409,72 +393,33 @@ namespace UGTLive
             return distance;
         }
 
-        private bool ShouldSkipGenericLlmOcrStreamingFrame(byte[] imageBytes)
+        private bool ShouldSkipGenericLlmOcrStreamingFrame(System.Drawing.Bitmap sourceBitmap)
         {
             if (!ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled())
             {
-                if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                {
-                    Log("[GLLM HASH] compare detect_changes=false decision=SEND");
-                }
                 return false;
             }
 
             try
             {
-                byte[] frameHash = ComputeGenericLlmOcrFrameHash(imageBytes, out var comparisonRect, out var sourceSize);
-                int hashDifference = int.MaxValue;
-                string currentHashPreview = FormatGenericLlmOcrHashPreview(frameHash);
-                bool matchesPreviousFrame;
-                string previousHashPreview;
+                byte[] frameHash = ComputeGenericLlmOcrFrameHash(sourceBitmap, out var comparisonRect, out var sourceSize);
+                bool matchesPreviousFrame = false;
 
                 lock (_genericLlmFrameHashLock)
                 {
-                    matchesPreviousFrame = _lastGenericLlmOcrFrameHash != null;
-                    previousHashPreview = FormatGenericLlmOcrHashPreview(_lastGenericLlmOcrFrameHash);
                     if (_lastGenericLlmOcrFrameHash != null)
                     {
-                        hashDifference = ComputeHammingDistance(frameHash, _lastGenericLlmOcrFrameHash);
-                        matchesPreviousFrame = hashDifference <= GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD;
+                        matchesPreviousFrame = ComputeHammingDistance(frameHash, _lastGenericLlmOcrFrameHash)
+                            <= GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD;
                     }
 
                     _lastGenericLlmOcrFrameHash = frameHash;
                 }
 
-                if (previousHashPreview == "none")
-                {
-                    if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                    {
-                        Log(
-                            $"[GLLM HASH] compare source={sourceSize.Width}x{sourceSize.Height} " +
-                            $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
-                            $"prev=none current={currentHashPreview} decision=BASELINE_SEND");
-                    }
-                    return false;
-                }
-
-                if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                {
-                    Log(
-                        $"[GLLM HASH] compare source={sourceSize.Width}x{sourceSize.Height} " +
-                        $"crop={comparisonRect.X},{comparisonRect.Y},{comparisonRect.Width},{comparisonRect.Height} " +
-                        $"prev={previousHashPreview} current={currentHashPreview} diff={hashDifference} " +
-                        $"threshold={GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD} decision={(matchesPreviousFrame ? "SKIP" : "SEND")}");
-                }
-
-                if (matchesPreviousFrame && ConfigManager.Instance.GetLogExtraDebugStuff())
-                {
-                    Log($"Streaming: Skipping Generic LLM OCR frame with image-hash difference {hashDifference}");
-                }
-
                 return matchesPreviousFrame;
             }
-            catch (Exception ex)
+            catch
             {
-                if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                {
-                    Log($"[GLLM HASH] compare error decision=SEND message={ex.Message}");
-                }
                 return false;
             }
         }
@@ -486,6 +431,76 @@ namespace UGTLive
             return ms.ToArray();
         }
 
+        private static int GetGenericLlmOcrNonNegativeIntConfig(string key, int defaultValue)
+        {
+            string rawValue = ConfigManager.Instance.GetValue(key, string.Empty).Trim();
+            if (string.IsNullOrEmpty(rawValue))
+            {
+                return defaultValue;
+            }
+
+            return int.TryParse(rawValue, out int parsedValue)
+                ? Math.Max(0, parsedValue)
+                : defaultValue;
+        }
+
+        private static System.Drawing.Bitmap? CreateGenericLlmOcrUploadBitmap(System.Drawing.Bitmap sourceBitmap)
+        {
+            int maxDimension = GetGenericLlmOcrNonNegativeIntConfig(
+                "generic_llm_ocr_max_dimension",
+                GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_DIMENSION);
+            int maxTotalPixels = GetGenericLlmOcrNonNegativeIntConfig(
+                "generic_llm_ocr_max_total_pixels",
+                GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_TOTAL_PIXELS);
+
+            int originalWidth = sourceBitmap.Width;
+            int originalHeight = sourceBitmap.Height;
+            int longestEdge = Math.Max(originalWidth, originalHeight);
+            long totalPixels = (long)originalWidth * originalHeight;
+            double scaleFactor = 1.0;
+
+            if (maxDimension > 0 && longestEdge > maxDimension)
+            {
+                scaleFactor = Math.Min(scaleFactor, maxDimension / (double)longestEdge);
+            }
+
+            if (maxTotalPixels > 0 && totalPixels > maxTotalPixels)
+            {
+                scaleFactor = Math.Min(scaleFactor, Math.Sqrt(maxTotalPixels / (double)totalPixels));
+            }
+
+            if (scaleFactor >= 0.9995)
+            {
+                return null;
+            }
+
+            int resizedWidth = Math.Max(1, (int)Math.Round(originalWidth * scaleFactor));
+            int resizedHeight = Math.Max(1, (int)Math.Round(originalHeight * scaleFactor));
+            var resizedBitmap = new System.Drawing.Bitmap(
+                resizedWidth,
+                resizedHeight,
+                System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            using (var graphics = System.Drawing.Graphics.FromImage(resizedBitmap))
+            {
+                graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                graphics.DrawImage(sourceBitmap, new System.Drawing.Rectangle(0, 0, resizedWidth, resizedHeight));
+            }
+
+            return resizedBitmap;
+        }
+
+        private static byte[] ConvertGenericLlmOcrBitmapToUploadBytes(System.Drawing.Bitmap sourceBitmap)
+        {
+            using System.Drawing.Bitmap? uploadBitmap = CreateGenericLlmOcrUploadBitmap(sourceBitmap);
+            System.Drawing.Bitmap bitmapToEncode = uploadBitmap ?? sourceBitmap;
+            return ConvertBitmapToPngBytes(bitmapToEncode);
+        }
+
         private async Task<(byte[] ImageBytes, System.Drawing.Bitmap ProcessingBitmap, bool SkipFrame)> PrepareBitmapForHttpOcrAsync(
             System.Drawing.Bitmap sourceBitmap,
             bool runGenericLlmFrameHashCheck)
@@ -495,8 +510,13 @@ namespace UGTLive
             {
                 var prepared = await Task.Run(() =>
                 {
-                    byte[] preparedBytes = ConvertBitmapToPngBytes(processingBitmap);
-                    bool skipFrame = runGenericLlmFrameHashCheck && ShouldSkipGenericLlmOcrStreamingFrame(preparedBytes);
+                    bool skipFrame = runGenericLlmFrameHashCheck && ShouldSkipGenericLlmOcrStreamingFrame(processingBitmap);
+                    byte[] preparedBytes = skipFrame
+                        ? Array.Empty<byte>()
+                        : (runGenericLlmFrameHashCheck
+                            ? ConvertGenericLlmOcrBitmapToUploadBytes(processingBitmap)
+                            : ConvertBitmapToPngBytes(processingBitmap));
+
                     return (ImageBytes: preparedBytes, SkipFrame: skipFrame);
                 });
 
@@ -509,12 +529,17 @@ namespace UGTLive
             }
         }
 
-        private async Task<(byte[] ImageBytes, System.Drawing.Bitmap ProcessingBitmap)> PrepareBitmapForProcessingAsync(System.Drawing.Bitmap sourceBitmap)
+        private async Task<(byte[] ImageBytes, System.Drawing.Bitmap ProcessingBitmap)> PrepareBitmapForProcessingAsync(
+            System.Drawing.Bitmap sourceBitmap,
+            bool optimizeForGenericLlm = false)
         {
             var processingBitmap = (System.Drawing.Bitmap)sourceBitmap.Clone();
             try
             {
-                byte[] imageBytes = await Task.Run(() => ConvertBitmapToPngBytes(processingBitmap));
+                byte[] imageBytes = await Task.Run(() =>
+                    optimizeForGenericLlm
+                        ? ConvertGenericLlmOcrBitmapToUploadBytes(processingBitmap)
+                        : ConvertBitmapToPngBytes(processingBitmap));
                 return (imageBytes, processingBitmap);
             }
             catch
@@ -547,6 +572,17 @@ namespace UGTLive
             lock (_processingTimingLock)
             {
                 _ocrTranslateCycleStopwatch.Restart();
+            }
+        }
+
+        private void RecordCurrentOcrProcessingTime()
+        {
+            lock (_processingTimingLock)
+            {
+                if (_ocrTranslateCycleStopwatch.IsRunning)
+                {
+                    TranslationStatus.SetLastOcrProcessingTime(_ocrTranslateCycleStopwatch.ElapsedMilliseconds);
+                }
             }
         }
         
@@ -693,13 +729,7 @@ namespace UGTLive
             _ocrProcessingStopwatch.Restart();
 
             // Capture OCR-only time: elapsed since BeginOcrTranslateCycle()
-            lock (_processingTimingLock)
-            {
-                if (_ocrTranslateCycleStopwatch.IsRunning)
-                {
-                    TranslationStatus.SetLastOcrProcessingTime(_ocrTranslateCycleStopwatch.ElapsedMilliseconds);
-                }
-            }
+            RecordCurrentOcrProcessingTime();
             
             // Reset auto-play trigger flag to allow auto-play on new OCR results
             AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
@@ -2376,7 +2406,11 @@ namespace UGTLive
         /// <summary>
         /// Process image using HTTP Python service
         /// </summary>
-        private async Task<string?> ProcessImageWithHttpServiceAsync(byte[] imageBytes, string serviceName, string language)
+        private async Task<string?> ProcessImageWithHttpServiceAsync(
+            byte[] imageBytes,
+            string serviceName,
+            string language,
+            System.Drawing.Size? sourceImageSize = null)
         {
             try
             {
@@ -2426,6 +2460,10 @@ namespace UGTLive
                 if (serviceName == "Generic LLM OCR")
                 {
                     url += $"&target_lang={Uri.EscapeDataString(targetLangParam)}";
+                    if (sourceImageSize.HasValue)
+                    {
+                        url += $"&source_width={sourceImageSize.Value.Width}&source_height={sourceImageSize.Value.Height}";
+                    }
                 }
                 
                 // Add MangaOCR-specific parameters
@@ -2452,6 +2490,7 @@ namespace UGTLive
                 using var request = new HttpRequestMessage(HttpMethod.Post, url);
                 request.Content = content;
                 request.Headers.ConnectionClose = false;
+
                 var llmStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 var response = await _httpClient.SendAsync(request);
                 
@@ -2538,7 +2577,11 @@ namespace UGTLive
         /// and incrementally creates TextObjects + overlay divs as each text region arrives.
         /// Returns true if streaming completed successfully, false otherwise.
         /// </summary>
-        private async Task<bool> ProcessImageStreamingAsync(byte[] imageBytes, string serviceName, string language)
+        private async Task<bool> ProcessImageStreamingAsync(
+            byte[] imageBytes,
+            string serviceName,
+            string language,
+            System.Drawing.Size? sourceImageSize = null)
         {
             var service = PythonServicesManager.Instance.GetServiceByName(serviceName);
             if (service == null || !service.IsRunning)
@@ -2550,6 +2593,10 @@ namespace UGTLive
             string langParam = MapLanguageForService(language);
             string targetLangParam = MapLanguageForService(ConfigManager.Instance.GetGenericLlmOcrTargetLanguage());
             string url = $"{service.ServerUrl}:{service.Port}/process_stream?lang={langParam}&target_lang={Uri.EscapeDataString(targetLangParam)}";
+            if (serviceName == "Generic LLM OCR" && sourceImageSize.HasValue)
+            {
+                url += $"&source_width={sourceImageSize.Value.Width}&source_height={sourceImageSize.Value.Height}";
+            }
 
             void ClearStreamingPreviewOverlays()
             {
@@ -3129,6 +3176,7 @@ namespace UGTLive
             System.Drawing.Bitmap? processingBitmap = null;
             byte[] imageBytes;
             bool skipGenericLlmFrame = false;
+            System.Drawing.Size? requestSourceSize = null;
             
             try
             {
@@ -3168,12 +3216,18 @@ namespace UGTLive
                         imageBytes = preparedBitmap.ImageBytes;
                         processingBitmap = preparedBitmap.ProcessingBitmap;
                         skipGenericLlmFrame = preparedBitmap.SkipFrame;
+                        requestSourceSize = processingBitmap.Size;
                     }
                     else
                     {
                         processingBitmap = (System.Drawing.Bitmap)bitmap.Clone();
-                        imageBytes = ConvertBitmapToPngBytes(processingBitmap);
-                        skipGenericLlmFrame = isGenericLlmOcr && ShouldSkipGenericLlmOcrStreamingFrame(imageBytes);
+                        skipGenericLlmFrame = isGenericLlmOcr && ShouldSkipGenericLlmOcrStreamingFrame(processingBitmap);
+                        requestSourceSize = processingBitmap.Size;
+                        imageBytes = skipGenericLlmFrame
+                            ? Array.Empty<byte>()
+                            : (isGenericLlmOcr
+                                ? ConvertGenericLlmOcrBitmapToUploadBytes(processingBitmap)
+                                : ConvertBitmapToPngBytes(processingBitmap));
                     }
                 }
                 catch (Exception ex)
@@ -3197,10 +3251,6 @@ namespace UGTLive
                     if (isGenericLlmOcr && ConfigManager.Instance.IsGenericLlmOcrStreamingEnabled())
                     {
                         long currentSessionId = _overlaySessionId;
-                        if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                        {
-                            Log($"[GLLM HASH] streaming_check overlaySession={currentSessionId} bytes={imageBytes.Length} detect_changes={ConfigManager.Instance.IsGenericLlmOcrDetectImageChangesEnabled()}");
-                        }
 
                         if (skipGenericLlmFrame)
                         {
@@ -3208,6 +3258,7 @@ namespace UGTLive
                             processingBitmap = null;
                             ClearCurrentProcessingBitmap();
                             MainWindow.Instance.SetOCRCheckIsWanted(true);
+                            RecordCurrentOcrProcessingTime();
                             NotifyOCRCompleted();
                             OnFinishedThings(true, skipOverlayRefresh: true);
                             return;
@@ -3223,24 +3274,19 @@ namespace UGTLive
 
                                 if (useBackgroundPreparation)
                                 {
-                                    var preparedCleanBitmap = await PrepareBitmapForProcessingAsync(cleanBitmap);
+                                    var preparedCleanBitmap = await PrepareBitmapForProcessingAsync(cleanBitmap, isGenericLlmOcr);
                                     imageBytes = preparedCleanBitmap.ImageBytes;
                                     processingBitmap = preparedCleanBitmap.ProcessingBitmap;
                                 }
                                 else
                                 {
                                     processingBitmap = (System.Drawing.Bitmap)cleanBitmap.Clone();
-                                    imageBytes = ConvertBitmapToPngBytes(processingBitmap);
+                                    imageBytes = isGenericLlmOcr
+                                        ? ConvertGenericLlmOcrBitmapToUploadBytes(processingBitmap)
+                                        : ConvertBitmapToPngBytes(processingBitmap);
                                 }
 
-                                if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                                {
-                                    Log($"[GLLM HASH] clean_recapture bytes={imageBytes.Length} decision=SEND");
-                                }
-                            }
-                            else if (ConfigManager.Instance.GetLogExtraDebugStuff())
-                            {
-                                Log("[GLLM HASH] clean_recapture failed, falling back to original capture");
+                                requestSourceSize = processingBitmap.Size;
                             }
                         }
 
@@ -3252,7 +3298,7 @@ namespace UGTLive
                         }
 
                         Log("Using streaming OCR path for Generic LLM OCR");
-                        bool streamSuccess = await ProcessImageStreamingAsync(imageBytes, ocrMethod, sourceLanguage);
+                        bool streamSuccess = await ProcessImageStreamingAsync(imageBytes, ocrMethod, sourceLanguage, requestSourceSize);
 
                         if (currentSessionId != _overlaySessionId)
                         {
@@ -3271,6 +3317,7 @@ namespace UGTLive
                         {
                             ClearCurrentProcessingBitmap();
                             MainWindow.Instance.SetOCRCheckIsWanted(true);
+                            RecordCurrentOcrProcessingTime();
                             NotifyOCRCompleted();
                             OnFinishedThings(true, skipOverlayRefresh: true);
                             return;
@@ -3284,6 +3331,7 @@ namespace UGTLive
                         processingBitmap = null;
                         ClearCurrentProcessingBitmap();
                         MainWindow.Instance.SetOCRCheckIsWanted(true);
+                        RecordCurrentOcrProcessingTime();
                         NotifyOCRCompleted();
                         OnFinishedThings(true, skipOverlayRefresh: true);
                         return;
@@ -3298,7 +3346,11 @@ namespace UGTLive
                     
                     // Process with HTTP service - returns JSON directly
                     long currentSessionId2 = _overlaySessionId;
-                    var jsonResponse = await ProcessImageWithHttpServiceAsync(imageBytes, ocrMethod, sourceLanguage);
+                    var jsonResponse = await ProcessImageWithHttpServiceAsync(
+                        imageBytes,
+                        ocrMethod,
+                        sourceLanguage,
+                        requestSourceSize);
                     
                     // Check if session is still valid
                     if (currentSessionId2 != _overlaySessionId)
@@ -3332,6 +3384,7 @@ namespace UGTLive
                             Log($"No valid response received from {ocrMethod} service");
                         }
                         ClearCurrentProcessingBitmap();
+                        RecordCurrentOcrProcessingTime();
                     }
                     
                     // Re-enable OCR check
@@ -3360,6 +3413,7 @@ namespace UGTLive
                 Log($"Error processing screenshot: {ex.Message}");
                 Log($"Stack trace: {ex.StackTrace}");
                 ClearCurrentProcessingBitmap();
+                RecordCurrentOcrProcessingTime();
                 
                 MainWindow.Instance.SetOCRCheckIsWanted(true);
             }

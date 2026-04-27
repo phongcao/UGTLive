@@ -129,7 +129,7 @@ atexit.register(_log_process_exit)
 STANDARD_REPO = "pnnbao-ump/VieNeu-TTS-q8-gguf"
 TURBO_REPO = "pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF"
 CODEC_REPO = "pnnbao-ump/VieNeu-Codec"
-NEUCODEC_ONNX_REPO = "neuphonic/neucodec-onnx-decoder-int8"
+NEUCODEC_ONNX_REPO = "neuphonic/neucodec-onnx-decoder"
 SPEECH_MAX    = 65535
 
 # Global references
@@ -589,7 +589,7 @@ async def _synthesize_audio(text: str, voice_id: Optional[str] = None, speed: Op
 
     if not text or not text.strip():
         raise HTTPException(status_code=400, detail="No text provided")
-
+    
     try:
         start_time = time.time()
         text_preview = text[:60] + "..." if len(text) > 60 else text

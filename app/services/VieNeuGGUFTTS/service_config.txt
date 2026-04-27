@@ -1,4 +1,4 @@
-description|Vietnamese Text-to-Speech using VieNeu GGUF model via LM Studio. Quantized inference (Q4_K_M) for fast CPU/GPU synthesis.|
+description|Vietnamese Text-to-Speech using VieNeu GGUF model via LM Studio. Q8 quantized inference for high-quality CPU/GPU synthesis.|
 github_url|https://huggingface.co/nguyen-brat/VieNeu-TTS-Vietnamese-Finetuned|
 service_author|Pham Nguyen Ngoc Bao|
 service_name|VieNeuGGUFTTS|
@@ -8,6 +8,6 @@ venv_name|ugt_vieneugguf|
 local_only|true|
 service_install_version|1|
 lm_studio_url|http://192.168.1.140:1234|
-lm_studio_model|vieneu-tts|
-model_type|standard|
-default_voice|Ngoc|
+lm_studio_model|vieneu-tts-v2-turbo|
+model_type|turbo|
+default_voice|Doan|

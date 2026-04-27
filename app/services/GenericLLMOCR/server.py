@@ -729,6 +729,20 @@ def get_non_negative_int(runtime_config: Dict[str, str], key: str, default: int)
         return default
 
 
+def get_optional_positive_int_query_param(request: Request, key: str) -> Optional[int]:
+    raw_value = (request.query_params.get(key, "") or "").strip()
+    if not raw_value:
+        return None
+
+    try:
+        parsed_value = int(raw_value)
+    except ValueError:
+        LOGGER.warning("Invalid Generic LLM OCR query param %s=%s. Ignoring.", key, raw_value)
+        return None
+
+    return parsed_value if parsed_value > 0 else None
+
+
 def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) -> Tuple[Image.Image, bytes]:
     max_dimension = get_non_negative_int(
         runtime_config,
@@ -1112,6 +1126,8 @@ def process_llm_results(
     mode: str,
     bbox_image_width: int,
     bbox_image_height: int,
+    source_image_width: Optional[int] = None,
+    source_image_height: Optional[int] = None,
 ) -> List[Dict]:
     text_objects: List[Dict] = []
 
@@ -1125,6 +1141,8 @@ def process_llm_results(
             mode,
             bbox_image_width,
             bbox_image_height,
+            source_image_width,
+            source_image_height,
         )
         if text_obj is not None:
             text_objects.append(text_obj)
@@ -1132,21 +1150,30 @@ def process_llm_results(
     return text_objects
 
 
-def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -> Dict:
+def process_image_sync(
+    image_bytes: bytes,
+    source_lang: str,
+    target_lang: str,
+    source_image_width: Optional[int] = None,
+    source_image_height: Optional[int] = None,
+) -> Dict:
     start_time = time.time()
     runtime_config = load_runtime_settings()
 
     t0 = time.time()
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    source_image_width = source_image_width or image.width
+    source_image_height = source_image_height or image.height
     save_debug_request_image(image, source_lang)
     llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
     if llm_image.size != image.size:
         save_debug_request_image(llm_image, source_lang, prefix="request_llm")
     t_prep = time.time()
     LOGGER.info(
-        "Timing: image_prep=%.1fms input=%sx%s llm=%sx%s payload_bytes=%s",
+        "Timing: image_prep=%.1fms input=%sx%s source=%sx%s llm=%sx%s payload_bytes=%s",
         (t_prep - t0) * 1000.0,
         image.width, image.height,
+        source_image_width, source_image_height,
         llm_image.width, llm_image.height,
         len(llm_image_bytes),
     )
@@ -1167,6 +1194,8 @@ def process_image_sync(image_bytes: bytes, source_lang: str, target_lang: str) -
         mode,
         llm_image.width,
         llm_image.height,
+        source_image_width,
+        source_image_height,
     )
     t_post = time.time()
 
@@ -1225,6 +1254,8 @@ def process_single_text_object(
     mode: str,
     bbox_image_width: int,
     bbox_image_height: int,
+    source_image_width: Optional[int] = None,
+    source_image_height: Optional[int] = None,
 ) -> Optional[Dict]:
     """Parse a single OCR response line into a text object dict (or None)."""
     match = TRANSLATION_PATTERN.match((raw_line or "").strip())
@@ -1234,13 +1265,21 @@ def process_single_text_object(
     raw_bbox, llm_text, translated_text = extract_translation_match_fields(match)
     parsed_bbox = parse_bbox_values(raw_bbox, bbox_image_width, bbox_image_height)
     bbox = None
+    color_bbox = None
     if parsed_bbox is not None:
-        bbox = remap_bbox_to_source(
+        color_bbox = remap_bbox_to_source(
             parsed_bbox,
             bbox_image_width,
             bbox_image_height,
             image.width,
             image.height,
+        )
+        bbox = remap_bbox_to_source(
+            parsed_bbox,
+            bbox_image_width,
+            bbox_image_height,
+            source_image_width or image.width,
+            source_image_height or image.height,
         )
 
     if not llm_text or bbox is None:
@@ -1274,7 +1313,11 @@ def process_single_text_object(
         text_obj["translated_text"] = translated_value
 
     try:
-        color_data = extract_foreground_background_colors(image, vertices)
+        color_vertices = vertices
+        if color_bbox is not None:
+            cx1, cy1, cx2, cy2 = color_bbox
+            color_vertices = [[cx1, cy1], [cx2, cy1], [cx2, cy2], [cx1, cy2]]
+        color_data = extract_foreground_background_colors(image, color_vertices)
         if color_data:
             attach_color_info(text_obj, color_data)
     except Exception as exc:
@@ -1288,6 +1331,8 @@ def process_partial_streaming_text_object(
     image: Image.Image,
     bbox_image_width: int,
     bbox_image_height: int,
+    source_image_width: Optional[int] = None,
+    source_image_height: Optional[int] = None,
 ) -> Optional[Dict]:
     stripped_line = (raw_line or "").strip()
     if not stripped_line:
@@ -1305,8 +1350,8 @@ def process_partial_streaming_text_object(
         parsed_bbox,
         bbox_image_width,
         bbox_image_height,
-        image.width,
-        image.height,
+        source_image_width or image.width,
+        source_image_height or image.height,
     )
     if bbox is None:
         return None
@@ -1421,13 +1466,21 @@ def query_llm_streaming(
     )
 
 
-def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
+def generate_sse_events(
+    image_bytes: bytes,
+    source_lang: str,
+    target_lang: str,
+    source_image_width: Optional[int] = None,
+    source_image_height: Optional[int] = None,
+):
     """Generator that yields SSE event strings for each new text object detected."""
     import json as _json
 
     runtime_config = load_runtime_settings()
 
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    source_image_width = source_image_width or image.width
+    source_image_height = source_image_height or image.height
     save_debug_request_image(image, source_lang)
     llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
     if llm_image.size != image.size:
@@ -1471,7 +1524,13 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
             for raw_line in completed_lines:
                 stream_id = f"stream_{emitted_count}"
                 text_obj = process_single_text_object(
-                    raw_line, image, mode, llm_image.width, llm_image.height
+                    raw_line,
+                    image,
+                    mode,
+                    llm_image.width,
+                    llm_image.height,
+                    source_image_width,
+                    source_image_height,
                 )
                 if text_obj is not None:
                     event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
@@ -1485,6 +1544,8 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
                 image,
                 llm_image.width,
                 llm_image.height,
+                source_image_width,
+                source_image_height,
             )
             if preview_obj is not None:
                 preview_signature = (
@@ -1518,6 +1579,8 @@ def generate_sse_events(image_bytes: bytes, source_lang: str, target_lang: str):
             mode,
             llm_image.width,
             llm_image.height,
+            source_image_width,
+            source_image_height,
         )
         if text_obj is not None:
             event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
@@ -1611,13 +1674,22 @@ async def process_image(request: Request):
         runtime_config = load_runtime_settings()
         source_lang = request.query_params.get("lang", runtime_config.get("source_language", "ja"))
         target_lang = get_target_language(request, runtime_config)
+        source_image_width = get_optional_positive_int_query_param(request, "source_width")
+        source_image_height = get_optional_positive_int_query_param(request, "source_height")
 
         image_bytes = await request.body()
         if not image_bytes:
             raise HTTPException(status_code=400, detail="No image data provided")
 
         async with OCR_PROCESS_SEMAPHORE:
-            response_content = await asyncio.to_thread(process_image_sync, image_bytes, source_lang, target_lang)
+            response_content = await asyncio.to_thread(
+                process_image_sync,
+                image_bytes,
+                source_lang,
+                target_lang,
+                source_image_width,
+                source_image_height,
+            )
         return JSONResponse(content=response_content)
     except Exception as exc:
         LOGGER.exception("Error processing image")
@@ -1654,6 +1726,8 @@ async def process_image_stream(request: Request):
         runtime_config = load_runtime_settings()
         source_lang = request.query_params.get("lang", runtime_config.get("source_language", "ja"))
         target_lang = get_target_language(request, runtime_config)
+        source_image_width = get_optional_positive_int_query_param(request, "source_width")
+        source_image_height = get_optional_positive_int_query_param(request, "source_height")
 
         image_bytes = await request.body()
         if not image_bytes:
@@ -1664,7 +1738,13 @@ async def process_image_stream(request: Request):
 
         def _run_generator():
             try:
-                for chunk in generate_sse_events(image_bytes, source_lang, target_lang):
+                for chunk in generate_sse_events(
+                    image_bytes,
+                    source_lang,
+                    target_lang,
+                    source_image_width,
+                    source_image_height,
+                ):
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
             except Exception as exc:
                 import json as _json
