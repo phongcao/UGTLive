@@ -732,7 +732,11 @@ namespace UGTLive
             RecordCurrentOcrProcessingTime();
             
             // Reset auto-play trigger flag to allow auto-play on new OCR results
-            AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
+            // But only if not currently playing - if playing, the pending mechanism handles it
+            if (!AudioPlaybackManager.Instance.IsPlayingAll())
+            {
+                AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
+            }
             
             // Check if we should pause OCR while translating
             bool pauseOcrWhileTranslating = ConfigManager.Instance.IsPauseOcrWhileTranslatingEnabled();
@@ -3525,11 +3529,21 @@ namespace UGTLive
                 // Cancel any in-progress audio preloading
                 AudioPreloadService.Instance.CancelAllPreloads();
                 
-                // Stop any currently playing audio
-                AudioPlaybackManager.Instance.StopCurrentPlayback();
-                
-                // Reset auto-play trigger flag to allow auto-play on next OCR
-                AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
+                // If auto-play-all is currently playing, don't interrupt it - let it finish
+                // and the pending auto-play mechanism will play the latest content afterward
+                if (AudioPlaybackManager.Instance.IsPlayingAll())
+                {
+                    // Reset auto-play trigger so new content can queue as pending
+                    AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
+                }
+                else
+                {
+                    // Stop any currently playing audio
+                    AudioPlaybackManager.Instance.StopCurrentPlayback();
+                    
+                    // Reset auto-play trigger flag to allow auto-play on next OCR
+                    AudioPlaybackManager.Instance.ResetAutoPlayTrigger();
+                }
                 
                 // If keeping translation visible, only clear the internal list but NOT the visual overlays
                 if (_keepingTranslationVisible)

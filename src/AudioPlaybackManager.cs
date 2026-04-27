@@ -17,11 +17,13 @@ namespace UGTLive
         private bool _isPlaying = false;
         private bool _isPlayingAll = false;
         private bool _autoPlayTriggered = false;
+        private bool _pendingAutoPlay = false;
         private CancellationTokenSource? _playbackCancellationToken;
         private readonly object _playbackLock = new object();
         private readonly object _speechRequestLock = new object();
         private int _activeSpeechRequests = 0;
         private string? _currentPlayingTextObjectId = null;
+        private string _lastPlayedCombinedText = string.Empty;
         
         // Event to notify when playback state changes
         public event EventHandler<bool>? PlayAllStateChanged;
@@ -294,6 +296,7 @@ namespace UGTLive
                 CleanupCurrentPlayback();
                 _isPlaying = false;
                 _isPlayingAll = false;
+                _pendingAutoPlay = false;
                 // Don't reset _autoPlayTriggered here - if stopped manually, we don't want auto-play to trigger again for this session
             }
 
@@ -537,6 +540,37 @@ namespace UGTLive
                 return;
             }
             
+            // Fuzzy check: skip TTS if the combined text is very similar to what was last played
+            string combinedText = string.Join("\n", objectsToPlay.Select(obj =>
+            {
+                if (useLocalQwenStreaming)
+                {
+                    TryGetStreamingTextForObject(obj, useSourceAudio, out string t);
+                    return t ?? "";
+                }
+                return useSourceAudio ? obj.Text : (obj.TextTranslated ?? obj.Text);
+            }));
+            
+            if (!string.IsNullOrEmpty(_lastPlayedCombinedText) && !string.IsNullOrEmpty(combinedText))
+            {
+                double similarity = ComputeTextSimilarity(_lastPlayedCombinedText, combinedText);
+                if (double.TryParse(ConfigManager.Instance.GetGenericLlmOcrFuzzyThreshold(), 
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double threshold))
+                {
+                    if (similarity >= threshold)
+                    {
+                        Console.WriteLine($"PlayAllAudio: Skipping TTS - text similarity {similarity:F3} >= threshold {threshold:F3}");
+                        lock (_playbackLock)
+                        {
+                            _autoPlayTriggered = false;
+                            _pendingAutoPlay = false;
+                        }
+                        return;
+                    }
+                }
+            }
+            _lastPlayedCombinedText = combinedText;
+            
             // Set playing all state and notify
             lock (_playbackLock)
             {
@@ -702,12 +736,25 @@ namespace UGTLive
             finally
             {
                 // Reset playing all state and notify
+                bool shouldRetriggerAutoPlay = false;
                 lock (_playbackLock)
                 {
                     _isPlayingAll = false;
-                    // Don't reset _autoPlayTriggered here - this prevents auto-play from triggering again for the same session
+                    if (_pendingAutoPlay)
+                    {
+                        _pendingAutoPlay = false;
+                        _autoPlayTriggered = false;
+                        shouldRetriggerAutoPlay = true;
+                    }
+                    // Don't reset _autoPlayTriggered here otherwise - this prevents auto-play from triggering again for the same session
                 }
                 OnPlayAllStateChanged(false);
+                
+                if (shouldRetriggerAutoPlay)
+                {
+                    Console.WriteLine("PlayAllAudioAsync: Triggering pending auto-play with latest content");
+                    CheckAndTriggerAutoPlay();
+                }
             }
         }
 
@@ -903,6 +950,57 @@ namespace UGTLive
             return _isPlaying;
         }
         
+        /// <summary>
+        /// Computes similarity ratio between two strings, equivalent to Python's difflib.SequenceMatcher.ratio().
+        /// Returns a value between 0.0 (completely different) and 1.0 (identical).
+        /// </summary>
+        private static double ComputeTextSimilarity(string a, string b)
+        {
+            if (a == b) return 1.0;
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0.0;
+            
+            int totalLength = a.Length + b.Length;
+            int matchingChars = CountMatchingCharacters(a, 0, a.Length, b, 0, b.Length);
+            return (2.0 * matchingChars) / totalLength;
+        }
+        
+        /// <summary>
+        /// Recursively counts matching characters using longest common substring,
+        /// mirroring Python's SequenceMatcher algorithm.
+        /// </summary>
+        private static int CountMatchingCharacters(string a, int aStart, int aEnd, string b, int bStart, int bEnd)
+        {
+            // Find longest common substring
+            int bestLen = 0, bestA = aStart, bestB = bStart;
+            for (int i = aStart; i < aEnd; i++)
+            {
+                for (int j = bStart; j < bEnd; j++)
+                {
+                    int k = 0;
+                    while (i + k < aEnd && j + k < bEnd && a[i + k] == b[j + k])
+                        k++;
+                    if (k > bestLen)
+                    {
+                        bestLen = k;
+                        bestA = i;
+                        bestB = j;
+                    }
+                }
+            }
+            
+            if (bestLen == 0) return 0;
+            
+            int count = bestLen;
+            // Recurse on left side
+            if (bestA > aStart && bestB > bStart)
+                count += CountMatchingCharacters(a, aStart, bestA, b, bStart, bestB);
+            // Recurse on right side
+            if (bestA + bestLen < aEnd && bestB + bestLen < bEnd)
+                count += CountMatchingCharacters(a, bestA + bestLen, aEnd, b, bestB + bestLen, bEnd);
+            
+            return count;
+        }
+        
         public void ResetAutoPlayTrigger()
         {
             lock (_playbackLock)
@@ -934,14 +1032,22 @@ namespace UGTLive
             // Prevent multiple simultaneous auto-play triggers
             lock (_playbackLock)
             {
-                // If already playing all or auto-play already triggered, don't trigger again
-                if (_isPlayingAll || _autoPlayTriggered)
+                if (_isPlayingAll)
                 {
-                    Console.WriteLine("CheckAndTriggerAutoPlay: Already playing or auto-play already triggered, skipping");
+                    // Audio is currently playing - don't interrupt, but remember to play latest when done
+                    _pendingAutoPlay = true;
+                    Console.WriteLine("CheckAndTriggerAutoPlay: Audio currently playing, marking pending auto-play for when finished");
+                    return;
+                }
+                
+                if (_autoPlayTriggered)
+                {
+                    Console.WriteLine("CheckAndTriggerAutoPlay: Auto-play already triggered, skipping");
                     return;
                 }
                 
                 // Set flag to prevent duplicate triggers
+                _pendingAutoPlay = false;
                 _autoPlayTriggered = true;
             }
             
