@@ -114,7 +114,7 @@ namespace UGTLive
         public const string OCR_WINDOW_WIDTH = "ocr_window_width";
         public const string OCR_WINDOW_HEIGHT = "ocr_window_height";
         
-        // Capture region presets (1-5)
+        // Capture region presets (0-5)
         public const string CAPTURE_REGION_PREFIX = "capture_region_";
         public const string ACTIVE_CAPTURE_REGION = "active_capture_region";
         
@@ -3874,12 +3874,12 @@ Here is the input JSON:";
             SaveConfig();
         }
         
-        // Capture region presets (1-5)
+        // Capture region presets (0-5)
         // Each region stores Left, Top, Width, Height as DIP values
         public bool GetCaptureRegion(int index, out double left, out double top, out double width, out double height)
         {
             left = top = width = height = 0;
-            if (index < 1 || index > 5) return false;
+            if (index < 0 || index > 5) return false;
             
             string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
             string lStr = GetValue($"{prefix}left", "");
@@ -3897,7 +3897,7 @@ Here is the input JSON:";
         
         public void SetCaptureRegion(int index, double left, double top, double width, double height)
         {
-            if (index < 1 || index > 5) return;
+            if (index < 0 || index > 5) return;
             
             string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
             _configValues[$"{prefix}left"] = left.ToString();
@@ -3909,7 +3909,7 @@ Here is the input JSON:";
         
         public void DeleteCaptureRegion(int index)
         {
-            if (index < 1 || index > 5) return;
+            if (index < 0 || index > 5) return;
             
             string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
             _configValues.Remove($"{prefix}left");
@@ -3921,15 +3921,25 @@ Here is the input JSON:";
         
         public bool HasCaptureRegion(int index)
         {
-            if (index < 1 || index > 5) return false;
+            if (index < 0 || index > 5) return false;
             string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
             return GetValue($"{prefix}left", "") != "";
         }
         
         public int GetActiveCaptureRegion()
         {
-            string value = GetValue(ACTIVE_CAPTURE_REGION, "0");
-            return int.TryParse(value, out int index) ? index : 0;
+            string value = GetValue(ACTIVE_CAPTURE_REGION, "-1");
+            if (!int.TryParse(value, out int index))
+            {
+                return -1;
+            }
+
+            if (index < 0 || index > 5)
+            {
+                return -1;
+            }
+
+            return HasCaptureRegion(index) ? index : -1;
         }
         
         public void SetActiveCaptureRegion(int index)

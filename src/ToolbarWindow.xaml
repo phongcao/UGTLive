@@ -207,6 +207,18 @@
             <!-- Capture Region Presets -->
             <TextBlock Text="Regions:" Foreground="#AAFFFFFF" FontSize="10" Margin="4,2,0,1"/>
             <UniformGrid Rows="1" Margin="2,0,2,2">
+                <Button x:Name="regionBtn0" Content="0" FontSize="10" Padding="0,2"
+                        Margin="1" Foreground="White" Background="#FF5F5F5F" BorderThickness="1" BorderBrush="#80808080"
+                        Click="RegionButton_Click" Tag="0"
+                        ToolTip="Switch to capture region 0 (Shift+0)">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                            </Border>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
                 <Button x:Name="regionBtn1" Content="1" FontSize="10" Padding="0,2"
                         Margin="1" Foreground="White" Background="#FF5F5F5F" BorderThickness="1" BorderBrush="#80808080"
                         Click="RegionButton_Click" Tag="1"
@@ -292,25 +304,6 @@
                         Margin="1" Foreground="White" Background="#FF5F5F5F" BorderThickness="1" BorderBrush="White"
                         Click="RegionDeleteButton_Click"
                         ToolTip="Delete the selected region slot">
-                    <Button.Template>
-                        <ControlTemplate TargetType="Button">
-                            <Grid>
-                                <Border x:Name="bgBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"/>
-                                <Border x:Name="hoverOverlay" Background="Transparent"/>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
-                            </Grid>
-                            <ControlTemplate.Triggers>
-                                <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter TargetName="hoverOverlay" Property="Background" Value="#30FFFFFF"/>
-                                </Trigger>
-                            </ControlTemplate.Triggers>
-                        </ControlTemplate>
-                    </Button.Template>
-                </Button>
-                <Button x:Name="regionResetButton" Content="0" FontSize="10" Padding="4,2" MinWidth="18"
-                        Margin="1" Foreground="White" Background="#FF5F5F5F" BorderThickness="1" BorderBrush="White"
-                        Click="RegionResetButton_Click"
-                        ToolTip="Reset to default/original size (Shift+0)">
                     <Button.Template>
                         <ControlTemplate TargetType="Button">
                             <Grid>

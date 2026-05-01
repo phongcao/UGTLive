@@ -144,14 +144,13 @@ namespace UGTLive
         private DateTime _blockHotkeyHideUntil = DateTime.MinValue;
         private DispatcherTimer? _startupVisibilityGuardTimer;
         private int _startupVisibilityGuardTicksRemaining = 0;
+        private bool _startupVisibilityRestoreEnabled = true;
         private bool _logCaptureRectOnce = false; // Debug flag for capture rect logging
         private double _savedLeft, _savedTop, _savedWidth, _savedHeight;
         private bool _hasSavedBorderPosition = false;
         
-        // Capture region presets (1-5), index 0 unused
-        private int _activeCaptureRegionIndex = 0; // 0 = default/none
-        private double _defaultLeft, _defaultTop, _defaultWidth, _defaultHeight;
-        private bool _hasDefaultPosition = false;
+        // Capture region presets (0-5); -1 means no saved region is currently active
+        private int _activeCaptureRegionIndex = -1;
         private DispatcherTimer _captureTimer;
         private string outputPath = DEFAULT_OUTPUT_PATH;
         private WindowInteropHelper helper;
@@ -595,7 +594,6 @@ namespace UGTLive
             HotkeyManager.Instance.OverlayModePreviousRequested += (s, e) => PreviousOverlayMode();
             HotkeyManager.Instance.SnapshotRequested += (s, e) => PerformSnapshot();
             HotkeyManager.Instance.CaptureRegionRequested += (s, index) => SwitchToCaptureRegion(index);
-            HotkeyManager.Instance.CaptureRegionResetRequested += (s, e) => ResetCaptureRegionToDefault();
             
             // Start gamepad manager
             GamepadManager.Instance.Start();
@@ -708,7 +706,7 @@ namespace UGTLive
                 return;
             }
 
-            HandleHideButton();
+            HandleHideButton(userInitiated: true);
         }
         
         private void TogglePassthrough()
@@ -985,17 +983,9 @@ namespace UGTLive
             // Create and show the floating toolbar
             CreateAndShowToolbar();
 
-            // Save the default window position (before any region is applied)
-            // so that reset (Shift+0) always has a position to return to
-            _defaultLeft = this.Left;
-            _defaultTop = this.Top;
-            _defaultWidth = this.Width;
-            _defaultHeight = this.Height;
-            _hasDefaultPosition = true;
-
             // Restore active capture region index from config
             _activeCaptureRegionIndex = ConfigManager.Instance.GetActiveCaptureRegion();
-            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex);
+            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex, syncSelectedSlot: true);
 
             // Update tooltips with hotkeys
             UpdateHotkeyTooltips();
@@ -1163,6 +1153,7 @@ namespace UGTLive
         private void StartStartupVisibilityGuard()
         {
             _startupVisibilityGuardTicksRemaining = 30;
+            _startupVisibilityRestoreEnabled = true;
 
             if (_startupVisibilityGuardTimer == null)
             {
@@ -1179,7 +1170,7 @@ namespace UGTLive
 
         private void StartupVisibilityGuardTimer_Tick(object? sender, EventArgs e)
         {
-            if (MainBorder != null && MainBorder.Visibility != Visibility.Visible)
+            if (_startupVisibilityRestoreEnabled && MainBorder != null && MainBorder.Visibility != Visibility.Visible)
             {
                 MainBorder.Visibility = Visibility.Visible;
 
@@ -1791,10 +1782,15 @@ namespace UGTLive
         
         private bool _passthroughStateBeforeHide = false;
 
-        public void HandleHideButton()
+        public void HandleHideButton(bool userInitiated = false)
         {
             if (MainBorder.Visibility == Visibility.Visible)
             {
+                if (userInitiated)
+                {
+                    _startupVisibilityRestoreEnabled = false;
+                }
+
                 MainBorder.Visibility = Visibility.Collapsed;
 
                 // Save passthrough state and force it on so the invisible overlay doesn't block clicks
@@ -1919,10 +1915,10 @@ namespace UGTLive
 
             UpdateCaptureRect();
 
-            // Mark as no specific region (fresh draw, not yet saved to a slot)
-            _activeCaptureRegionIndex = 0;
-            ConfigManager.Instance.SetActiveCaptureRegion(0);
-            _toolbarWindow?.UpdateCaptureRegionButtons(0);
+            // Mark as not currently using a saved slot (fresh draw, not yet saved)
+            _activeCaptureRegionIndex = -1;
+            ConfigManager.Instance.SetActiveCaptureRegion(-1);
+            _toolbarWindow?.UpdateCaptureRegionButtons(-1);
 
             Console.WriteLine($"Capture area drawn: screen({selectionRect.X:F0},{selectionRect.Y:F0} {selectionRect.Width:F0}x{selectionRect.Height:F0}) -> window({this.Left:F0},{this.Top:F0} {this.Width:F0}x{this.Height:F0})");
         }
@@ -1948,10 +1944,10 @@ namespace UGTLive
             Console.WriteLine($"Red border reset to: ({_savedLeft:F0},{_savedTop:F0} {_savedWidth:F0}x{_savedHeight:F0})");
         }
 
-        // Save current window position/size to a capture region preset (1-5)
+        // Save current window position/size to a capture region preset (0-5)
         public void SaveCaptureRegion(int index)
         {
-            if (index < 1 || index > 5) return;
+            if (index < 0 || index > 5) return;
             
             ConfigManager.Instance.SetCaptureRegion(index, this.Left, this.Top, this.Width, this.Height);
             _activeCaptureRegionIndex = index;
@@ -1960,13 +1956,13 @@ namespace UGTLive
             Console.WriteLine($"Capture region {index} saved: ({this.Left:F0},{this.Top:F0} {this.Width:F0}x{this.Height:F0})");
             
             // Update toolbar UI
-            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex);
+            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex, syncSelectedSlot: true);
         }
         
-        // Switch to a saved capture region preset (1-5)
+        // Switch to a saved capture region preset (0-5)
         public void SwitchToCaptureRegion(int index)
         {
-            if (index < 1 || index > 5) return;
+            if (index < 0 || index > 5) return;
             
             if (!ConfigManager.Instance.GetCaptureRegion(index, out double left, out double top, out double width, out double height))
             {
@@ -2010,20 +2006,20 @@ namespace UGTLive
             Console.WriteLine($"Switched to capture region {index}: ({left:F0},{top:F0} {width:F0}x{height:F0})");
             
             // Update toolbar UI
-            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex);
+            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex, syncSelectedSlot: true);
         }
         
         // Delete a saved capture region preset
         public void DeleteCaptureRegion(int index)
         {
-            if (index < 1 || index > 5) return;
+            if (index < 0 || index > 5) return;
             
             ConfigManager.Instance.DeleteCaptureRegion(index);
             
             if (_activeCaptureRegionIndex == index)
             {
-                _activeCaptureRegionIndex = 0;
-                ConfigManager.Instance.SetActiveCaptureRegion(0);
+                _activeCaptureRegionIndex = -1;
+                ConfigManager.Instance.SetActiveCaptureRegion(-1);
             }
             
             Console.WriteLine($"Capture region {index} deleted");
@@ -2031,46 +2027,8 @@ namespace UGTLive
             // Update toolbar UI
             _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex);
         }
-        
-        // Reset capture region to default (slot 0 / original position)
-        public void ResetCaptureRegionToDefault()
-        {
-            // Keep toolbar at its current screen position while the main window moves
-            _suppressToolbarReposition = true;
-            
-            if (_hasSavedBorderPosition)
-            {
-                // Use the saved pre-draw/pre-switch position
-                HandleResetBorderButton();
-            }
-            else if (_hasDefaultPosition)
-            {
-                // Fall back to the startup default position
-                this.Left = _defaultLeft;
-                this.Top = _defaultTop;
-                this.Width = _defaultWidth;
-                this.Height = _defaultHeight;
-                
-                if (MainBorder.Visibility != Visibility.Visible)
-                {
-                    HandleHideButton();
-                }
-                
-                UpdateCaptureRect();
-                Console.WriteLine($"Reset to default position: ({_defaultLeft:F0},{_defaultTop:F0} {_defaultWidth:F0}x{_defaultHeight:F0})");
-            }
-            
-            _suppressToolbarReposition = false;
-            SaveToolbarOffset();
-            
-            _activeCaptureRegionIndex = 0;
-            ConfigManager.Instance.SetActiveCaptureRegion(0);
-            
-            // Update toolbar UI
-            _toolbarWindow?.UpdateCaptureRegionButtons(_activeCaptureRegionIndex);
-        }
-        
-        // Get the currently active capture region index (0 = default)
+
+        // Get the currently active capture region index (-1 = none selected)
         public int GetActiveCaptureRegionIndex() => _activeCaptureRegionIndex;
 
         public void HandleMinimizeButton()

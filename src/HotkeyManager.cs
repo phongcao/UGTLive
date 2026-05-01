@@ -48,8 +48,7 @@ namespace UGTLive
         public event EventHandler? ViewInBrowserRequested;
         public event EventHandler? PlayAllAudioRequested;
         public event EventHandler? SnapshotRequested;
-        public event EventHandler<int>? CaptureRegionRequested;  // int = region index 1-5
-        public event EventHandler? CaptureRegionResetRequested;  // reset to default (0)
+        public event EventHandler<int>? CaptureRegionRequested;  // int = region index 0-5
         
         private HotkeyManager()
         {
@@ -290,6 +289,9 @@ namespace UGTLive
                 case "snapshot":
                     SnapshotRequested?.Invoke(this, EventArgs.Empty);
                     break;
+                case "capture_region_0":
+                    CaptureRegionRequested?.Invoke(this, 0);
+                    break;
                 case "capture_region_1":
                     CaptureRegionRequested?.Invoke(this, 1);
                     break;
@@ -305,9 +307,6 @@ namespace UGTLive
                 case "capture_region_5":
                     CaptureRegionRequested?.Invoke(this, 5);
                     break;
-                case "capture_region_reset":
-                    CaptureRegionResetRequested?.Invoke(this, EventArgs.Empty);
-                    break;
             }
         }
         
@@ -322,6 +321,7 @@ namespace UGTLive
         private void LoadHotkeys()
         {
             _actionBindings.Clear();
+            bool migratedLegacyRegionReset = false;
             
             if (File.Exists(HOTKEYS_FILE))
             {
@@ -345,6 +345,13 @@ namespace UGTLive
                         var entry = HotkeyEntry.Deserialize(lines[i]);
                         if (entry != null)
                         {
+                            if (entry.ActionId == "capture_region_reset")
+                            {
+                                entry.ActionId = "capture_region_0";
+                                entry.ActionName = "Capture Region 0";
+                                migratedLegacyRegionReset = true;
+                            }
+
                             if (!_actionBindings.ContainsKey(entry.ActionId))
                             {
                                 _actionBindings[entry.ActionId] = new List<HotkeyEntry>();
@@ -358,6 +365,11 @@ namespace UGTLive
                     
                     // Backfill any new actions that were added since the file was last saved
                     BackfillMissingDefaults();
+
+                    if (migratedLegacyRegionReset)
+                    {
+                        SaveHotkeys();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -480,6 +492,9 @@ namespace UGTLive
             
             var snapshot = new HotkeyEntry("snapshot", "Snapshot OCR") { KeyboardKey = Key.Z, UseShift = true };
             defaults["snapshot"] = new List<HotkeyEntry> { snapshot };
+
+            var region0 = new HotkeyEntry("capture_region_0", "Capture Region 0") { KeyboardKey = Key.D0, UseShift = true };
+            defaults["capture_region_0"] = new List<HotkeyEntry> { region0 };
             
             var region1 = new HotkeyEntry("capture_region_1", "Capture Region 1") { KeyboardKey = Key.D1, UseShift = true };
             defaults["capture_region_1"] = new List<HotkeyEntry> { region1 };
@@ -495,9 +510,6 @@ namespace UGTLive
             
             var region5 = new HotkeyEntry("capture_region_5", "Capture Region 5") { KeyboardKey = Key.D5, UseShift = true };
             defaults["capture_region_5"] = new List<HotkeyEntry> { region5 };
-            
-            var regionReset = new HotkeyEntry("capture_region_reset", "Reset Capture Region") { KeyboardKey = Key.D0, UseShift = true };
-            defaults["capture_region_reset"] = new List<HotkeyEntry> { regionReset };
             
             // Play All Audio - No default key
             var playAllAudio = new HotkeyEntry("play_all_audio", "Play All Audio");

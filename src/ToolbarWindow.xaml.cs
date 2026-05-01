@@ -215,7 +215,7 @@ namespace UGTLive
 
         private void HideButton_Click(object sender, RoutedEventArgs e)
         {
-            MainWindow.Instance?.HandleHideButton();
+            MainWindow.Instance?.HandleHideButton(userInitiated: true);
         }
 
         private void DrawBorderButton_Click(object sender, RoutedEventArgs e)
@@ -230,7 +230,7 @@ namespace UGTLive
 
         // --- Capture Region Preset Buttons ---
         
-        private int _selectedRegionSlot = 1; // Which slot Save/Del will target (1-5)
+        private int _selectedRegionSlot = 0; // Which slot Save/Del will target (0-5)
         
         private void RegionButton_Click(object sender, RoutedEventArgs e)
         {
@@ -246,7 +246,7 @@ namespace UGTLive
                 else
                 {
                     // Just select the slot for saving
-                    UpdateCaptureRegionButtons(MainWindow.Instance?.GetActiveCaptureRegionIndex() ?? 0);
+                    UpdateCaptureRegionButtons(MainWindow.Instance?.GetActiveCaptureRegionIndex() ?? -1);
                 }
             }
         }
@@ -261,19 +261,19 @@ namespace UGTLive
             MainWindow.Instance?.DeleteCaptureRegion(_selectedRegionSlot);
         }
         
-        private void RegionResetButton_Click(object sender, RoutedEventArgs e)
-        {
-            MainWindow.Instance?.ResetCaptureRegionToDefault();
-        }
-        
         // Update the visual state of region buttons
-        public void UpdateCaptureRegionButtons(int activeIndex)
+        public void UpdateCaptureRegionButtons(int activeIndex, bool syncSelectedSlot = false)
         {
-            var buttons = new[] { regionBtn1, regionBtn2, regionBtn3, regionBtn4, regionBtn5 };
+            if (syncSelectedSlot && activeIndex >= 0 && activeIndex <= 5)
+            {
+                _selectedRegionSlot = activeIndex;
+            }
+
+            var buttons = new[] { regionBtn0, regionBtn1, regionBtn2, regionBtn3, regionBtn4, regionBtn5 };
             
             for (int i = 0; i < buttons.Length; i++)
             {
-                int regionIndex = i + 1;
+                int regionIndex = i;
                 bool hasSaved = ConfigManager.Instance.HasCaptureRegion(regionIndex);
                 bool isActive = (regionIndex == activeIndex);
                 bool isSelected = (regionIndex == _selectedRegionSlot);
@@ -302,16 +302,6 @@ namespace UGTLive
                 {
                     buttons[i].BorderBrush = new SolidColorBrush(WpfColor.FromRgb(255, 200, 50));
                 }
-            }
-            
-            // Update the reset/0 button
-            if (activeIndex == 0)
-            {
-                regionResetButton.Background = new SolidColorBrush(WpfColor.FromRgb(46, 160, 67));
-            }
-            else
-            {
-                regionResetButton.Background = new SolidColorBrush(WpfColor.FromRgb(95, 95, 95));
             }
         }
 

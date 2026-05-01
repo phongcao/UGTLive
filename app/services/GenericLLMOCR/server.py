@@ -73,7 +73,8 @@ DEFAULT_FUZZY_MATCH = True
 DEFAULT_FUZZY_THRESHOLD = 0.85
 DEFAULT_MAX_IMAGE_DIMENSION = 768
 DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000
-DEFAULT_MIN_IMAGE_SHORT_EDGE = 200
+DEFAULT_MAX_ASPECT_RATIO = 4.0
+DEFAULT_PAD_TARGET_RATIO = 3.0
 DEFAULT_TRANSLATION_CACHE_MAX_SIZE = 10000
 DEFAULT_TRANSLATION_CACHE_SAVE_INTERVAL = 300  # seconds
 TRANSLATION_CACHE_PATH = Path(__file__).parent / "translation_cache.json"
@@ -129,6 +130,7 @@ PROMPT_OCR_TRANSLATE = (
     "Ignore numeric-only text such as 123, 12/50, 99%, 03:21, damage values, counters, stat-only readouts, and other HUD-style number displays.\n"
     "Keep numbers only when they are part of a larger phrase or sentence whose wording matters.\n"
     "First infer the likely overall context of the image and use it internally to choose accurate terminology and tone.\n"
+    "For Chinese fantasy, wuxia, xianxia, cultivation, sect, deity, or historical dialogue, use natural Vietnamese Sino-Vietnamese localization terms when the target language is Vietnamese.\n"
     "For EACH text region output EXACTLY one line in this format:\n"
     "BBOX:[x1,y1,x2,y2]|TEXT:<translated text>\n"
     "where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner in pixel coordinates.\n"
@@ -137,22 +139,19 @@ PROMPT_OCR_TRANSLATE = (
     "Do NOT include the original/source text, transliterations, or extra labels.\n"
     "Do NOT output the inferred context.\n"
     f"If no readable text is present, output EXACTLY {NO_TEXT_SENTINEL} and nothing else.\n"
-    f"Never translate, explain, or wrap {NO_TEXT_SENTINEL} in any extra text.\n"
+    f"Never translate, explain, or wrap {NO_TEXT_SENTINEL} in any extra text.\n"    
     "Output ONLY the list, no extra explanation."
 )
 
 PROMPT_TRANSLATE_TEXT = (
     "You are a translation engine. Translate each numbered line below from {source_lang} to {target_lang}.\n"
-    "CRITICAL: Translate EVERY word and character. The output must contain ONLY {target_lang} text.\n"
-    "Do NOT leave any {source_lang} characters untranslated in the output.\n"
-    "If a word is a name, transliterate it into {target_lang}. If a word is a title or role, translate its meaning.\n"
     "Output EXACTLY the same number of lines, each prefixed with the SAME number.\n"
     "Do NOT add, remove, or reorder lines. Do NOT add explanations.\n"
     "Format:\n"
     "1. <translated text>\n"
     "2. <translated text>\n"
     "...\n"
-    "Output ONLY the numbered translations. /no_think"
+    "Output ONLY the numbered translations."
 )
 
 NO_TEXT_RESPONSE_PATTERNS = {
@@ -244,8 +243,8 @@ def _clean_llm_text(text: str) -> str:
     cleaned = _strip_bbox_from_text(cleaned)
     # Replace literal "\n" escape sequences (two characters) that some LLMs emit
     cleaned = cleaned.replace("\\n", " ")
-    # Replace trailing ~ tone markers (CJK expressive style) with ! for Vietnamese
-    cleaned = re.sub(r"~+\s*$", "!", cleaned)
+    # Replace ~ and ～ tone markers (CJK expressive style) with ! in translated text
+    cleaned = cleaned.replace("\uff5e", "!").replace("~", "!")
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -747,7 +746,16 @@ def get_optional_positive_int_query_param(request: Request, key: str) -> Optiona
     return parsed_value if parsed_value > 0 else None
 
 
-def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) -> Tuple[Image.Image, bytes]:
+def prepare_image_for_llm(
+    image: Image.Image, runtime_config: Dict[str, str],
+) -> Tuple[Image.Image, bytes, int, int, int, int]:
+    """Resize and optionally pad image for LLM.
+
+    Returns (prepared_image, png_bytes, pad_left, pad_top, content_width, content_height).
+    ``pad_left``/``pad_top`` are the pixel offsets of the original content within
+    the (possibly padded) image.  ``content_width``/``content_height`` are the
+    dimensions of the actual content region (before padding).
+    """
     max_dimension = get_non_negative_int(
         runtime_config,
         "generic_llm_ocr_max_dimension",
@@ -759,15 +767,8 @@ def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) ->
         DEFAULT_MAX_IMAGE_TOTAL_PIXELS,
     )
 
-    min_short_edge = get_non_negative_int(
-        runtime_config,
-        "generic_llm_ocr_min_short_edge",
-        DEFAULT_MIN_IMAGE_SHORT_EDGE,
-    )
-
     original_width, original_height = image.size
     longest_edge = max(original_width, original_height)
-    shortest_edge = min(original_width, original_height)
     total_pixels = original_width * original_height
     scale_factor = 1.0
 
@@ -776,12 +777,6 @@ def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) ->
 
     if max_total_pixels > 0 and total_pixels > max_total_pixels:
         scale_factor = min(scale_factor, (max_total_pixels / float(total_pixels)) ** 0.5)
-
-    # Ensure the short edge doesn't shrink below the minimum readable size
-    if min_short_edge > 0 and shortest_edge >= min_short_edge:
-        min_scale = min_short_edge / float(shortest_edge)
-        if scale_factor < min_scale:
-            scale_factor = min_scale
 
     if scale_factor < 0.9995:
         resized_width = max(1, int(round(original_width * scale_factor)))
@@ -794,9 +789,40 @@ def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) ->
     else:
         prepared_image = image
 
+    # Pad extreme aspect ratios so the LLM can produce accurate bounding boxes.
+    content_width, content_height = prepared_image.size
+    pad_left, pad_top = 0, 0
+    short_edge = max(1, min(content_width, content_height))
+    long_edge = max(content_width, content_height)
+    ratio = long_edge / float(short_edge)
+
+    if ratio > DEFAULT_MAX_ASPECT_RATIO:
+        target_short = max(1, int(round(long_edge / DEFAULT_PAD_TARGET_RATIO)))
+        if content_width > content_height:
+            # Wide image: pad height
+            pad_top = (target_short - content_height) // 2
+            padded = Image.new("RGB", (content_width, target_short), (0, 0, 0))
+            padded.paste(prepared_image, (0, pad_top))
+        else:
+            # Tall image: pad width
+            pad_left = (target_short - content_width) // 2
+            padded = Image.new("RGB", (target_short, content_height), (0, 0, 0))
+            padded.paste(prepared_image, (pad_left, 0))
+        prepared_image = padded
+        LOGGER.info(
+            "Padded extreme aspect ratio image from %sx%s to %sx%s "
+            "(pad_left=%s, pad_top=%s, ratio=%.1f->%.1f)",
+            content_width, content_height,
+            prepared_image.width, prepared_image.height,
+            pad_left, pad_top,
+            ratio,
+            max(prepared_image.width, prepared_image.height)
+            / float(max(1, min(prepared_image.width, prepared_image.height))),
+        )
+
     output_buffer = BytesIO()
     prepared_image.save(output_buffer, format="PNG")
-    return prepared_image, output_buffer.getvalue()
+    return prepared_image, output_buffer.getvalue(), pad_left, pad_top, content_width, content_height
 
 
 def parse_bbox_values(raw_bbox: str, img_w: int, img_h: int) -> Optional[Tuple[int, int, int, int]]:
@@ -848,6 +874,23 @@ def parse_bbox_values(raw_bbox: str, img_w: int, img_h: int) -> Optional[Tuple[i
         return None
 
     return x1_i, y1_i, x2_i, y2_i
+
+
+def unpad_bbox(
+    bbox: Tuple[int, int, int, int],
+    pad_left: int,
+    pad_top: int,
+    content_width: int,
+    content_height: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    """Shift a BBOX from padded image space into content (unpadded) space."""
+    x1 = max(0, min(content_width, bbox[0] - pad_left))
+    y1 = max(0, min(content_height, bbox[1] - pad_top))
+    x2 = max(0, min(content_width, bbox[2] - pad_left))
+    y2 = max(0, min(content_height, bbox[3] - pad_top))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
 
 
 def remap_bbox_to_source(
@@ -1145,6 +1188,10 @@ def process_llm_results(
     bbox_image_height: int,
     source_image_width: Optional[int] = None,
     source_image_height: Optional[int] = None,
+    pad_left: int = 0,
+    pad_top: int = 0,
+    content_width: Optional[int] = None,
+    content_height: Optional[int] = None,
 ) -> List[Dict]:
     text_objects: List[Dict] = []
 
@@ -1160,6 +1207,10 @@ def process_llm_results(
             bbox_image_height,
             source_image_width,
             source_image_height,
+            pad_left,
+            pad_top,
+            content_width,
+            content_height,
         )
         if text_obj is not None:
             text_objects.append(text_obj)
@@ -1182,7 +1233,7 @@ def process_image_sync(
     source_image_width = source_image_width or image.width
     source_image_height = source_image_height or image.height
     save_debug_request_image(image, source_lang)
-    llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
+    llm_image, llm_image_bytes, pad_left, pad_top, content_w, content_h = prepare_image_for_llm(image, runtime_config)
     if llm_image.size != image.size:
         save_debug_request_image(llm_image, source_lang, prefix="request_llm")
     t_prep = time.time()
@@ -1213,6 +1264,10 @@ def process_image_sync(
         llm_image.height,
         source_image_width,
         source_image_height,
+        pad_left,
+        pad_top,
+        content_w,
+        content_h,
     )
     t_post = time.time()
 
@@ -1273,8 +1328,15 @@ def process_single_text_object(
     bbox_image_height: int,
     source_image_width: Optional[int] = None,
     source_image_height: Optional[int] = None,
+    pad_left: int = 0,
+    pad_top: int = 0,
+    content_width: Optional[int] = None,
+    content_height: Optional[int] = None,
 ) -> Optional[Dict]:
     """Parse a single OCR response line into a text object dict (or None)."""
+    content_w = content_width or bbox_image_width
+    content_h = content_height or bbox_image_height
+
     match = TRANSLATION_PATTERN.match((raw_line or "").strip())
     if match is None:
         return None
@@ -1284,17 +1346,21 @@ def process_single_text_object(
     bbox = None
     color_bbox = None
     if parsed_bbox is not None:
+        if pad_left or pad_top:
+            parsed_bbox = unpad_bbox(parsed_bbox, pad_left, pad_top, content_w, content_h)
+            if parsed_bbox is None:
+                return None
         color_bbox = remap_bbox_to_source(
             parsed_bbox,
-            bbox_image_width,
-            bbox_image_height,
+            content_w,
+            content_h,
             image.width,
             image.height,
         )
         bbox = remap_bbox_to_source(
             parsed_bbox,
-            bbox_image_width,
-            bbox_image_height,
+            content_w,
+            content_h,
             source_image_width or image.width,
             source_image_height or image.height,
         )
@@ -1350,7 +1416,14 @@ def process_partial_streaming_text_object(
     bbox_image_height: int,
     source_image_width: Optional[int] = None,
     source_image_height: Optional[int] = None,
+    pad_left: int = 0,
+    pad_top: int = 0,
+    content_width: Optional[int] = None,
+    content_height: Optional[int] = None,
 ) -> Optional[Dict]:
+    content_w = content_width or bbox_image_width
+    content_h = content_height or bbox_image_height
+
     stripped_line = (raw_line or "").strip()
     if not stripped_line:
         return None
@@ -1363,10 +1436,15 @@ def process_partial_streaming_text_object(
     if parsed_bbox is None:
         return None
 
+    if pad_left or pad_top:
+        parsed_bbox = unpad_bbox(parsed_bbox, pad_left, pad_top, content_w, content_h)
+        if parsed_bbox is None:
+            return None
+
     bbox = remap_bbox_to_source(
         parsed_bbox,
-        bbox_image_width,
-        bbox_image_height,
+        content_w,
+        content_h,
         source_image_width or image.width,
         source_image_height or image.height,
     )
@@ -1499,7 +1577,7 @@ def generate_sse_events(
     source_image_width = source_image_width or image.width
     source_image_height = source_image_height or image.height
     save_debug_request_image(image, source_lang)
-    llm_image, llm_image_bytes = prepare_image_for_llm(image, runtime_config)
+    llm_image, llm_image_bytes, pad_left, pad_top, content_w, content_h = prepare_image_for_llm(image, runtime_config)
     if llm_image.size != image.size:
         save_debug_request_image(llm_image, source_lang, prefix="request_llm")
 
@@ -1548,6 +1626,10 @@ def generate_sse_events(
                     llm_image.height,
                     source_image_width,
                     source_image_height,
+                    pad_left,
+                    pad_top,
+                    content_w,
+                    content_h,
                 )
                 if text_obj is not None:
                     event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
@@ -1563,6 +1645,10 @@ def generate_sse_events(
                 llm_image.height,
                 source_image_width,
                 source_image_height,
+                pad_left,
+                pad_top,
+                content_w,
+                content_h,
             )
             if preview_obj is not None:
                 preview_signature = (
@@ -1598,6 +1684,10 @@ def generate_sse_events(
             llm_image.height,
             source_image_width,
             source_image_height,
+            pad_left,
+            pad_top,
+            content_w,
+            content_h,
         )
         if text_obj is not None:
             event_data = {"event": "text_object", "stream_id": stream_id, "data": text_obj}
