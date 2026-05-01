@@ -114,6 +114,10 @@ namespace UGTLive
         public const string OCR_WINDOW_WIDTH = "ocr_window_width";
         public const string OCR_WINDOW_HEIGHT = "ocr_window_height";
         
+        // Capture region presets (1-5)
+        public const string CAPTURE_REGION_PREFIX = "capture_region_";
+        public const string ACTIVE_CAPTURE_REGION = "active_capture_region";
+        
         // ChatBox window persistence
         public const string CHATBOX_WINDOW_LEFT = "chatbox_window_left";
         public const string CHATBOX_WINDOW_TOP = "chatbox_window_top";
@@ -3867,6 +3871,70 @@ Here is the input JSON:";
             _configValues[OCR_WINDOW_TOP] = top.ToString();
             _configValues[OCR_WINDOW_WIDTH] = width.ToString();
             _configValues[OCR_WINDOW_HEIGHT] = height.ToString();
+            SaveConfig();
+        }
+        
+        // Capture region presets (1-5)
+        // Each region stores Left, Top, Width, Height as DIP values
+        public bool GetCaptureRegion(int index, out double left, out double top, out double width, out double height)
+        {
+            left = top = width = height = 0;
+            if (index < 1 || index > 5) return false;
+            
+            string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
+            string lStr = GetValue($"{prefix}left", "");
+            string tStr = GetValue($"{prefix}top", "");
+            string wStr = GetValue($"{prefix}width", "");
+            string hStr = GetValue($"{prefix}height", "");
+            
+            if (double.TryParse(lStr, out left) && double.TryParse(tStr, out top) &&
+                double.TryParse(wStr, out width) && double.TryParse(hStr, out height))
+            {
+                return true;
+            }
+            return false;
+        }
+        
+        public void SetCaptureRegion(int index, double left, double top, double width, double height)
+        {
+            if (index < 1 || index > 5) return;
+            
+            string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
+            _configValues[$"{prefix}left"] = left.ToString();
+            _configValues[$"{prefix}top"] = top.ToString();
+            _configValues[$"{prefix}width"] = width.ToString();
+            _configValues[$"{prefix}height"] = height.ToString();
+            SaveConfig();
+        }
+        
+        public void DeleteCaptureRegion(int index)
+        {
+            if (index < 1 || index > 5) return;
+            
+            string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
+            _configValues.Remove($"{prefix}left");
+            _configValues.Remove($"{prefix}top");
+            _configValues.Remove($"{prefix}width");
+            _configValues.Remove($"{prefix}height");
+            SaveConfig();
+        }
+        
+        public bool HasCaptureRegion(int index)
+        {
+            if (index < 1 || index > 5) return false;
+            string prefix = $"{CAPTURE_REGION_PREFIX}{index}_";
+            return GetValue($"{prefix}left", "") != "";
+        }
+        
+        public int GetActiveCaptureRegion()
+        {
+            string value = GetValue(ACTIVE_CAPTURE_REGION, "0");
+            return int.TryParse(value, out int index) ? index : 0;
+        }
+        
+        public void SetActiveCaptureRegion(int index)
+        {
+            _configValues[ACTIVE_CAPTURE_REGION] = index.ToString();
             SaveConfig();
         }
         

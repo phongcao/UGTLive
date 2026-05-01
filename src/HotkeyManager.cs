@@ -48,6 +48,8 @@ namespace UGTLive
         public event EventHandler? ViewInBrowserRequested;
         public event EventHandler? PlayAllAudioRequested;
         public event EventHandler? SnapshotRequested;
+        public event EventHandler<int>? CaptureRegionRequested;  // int = region index 1-5
+        public event EventHandler? CaptureRegionResetRequested;  // reset to default (0)
         
         private HotkeyManager()
         {
@@ -288,6 +290,24 @@ namespace UGTLive
                 case "snapshot":
                     SnapshotRequested?.Invoke(this, EventArgs.Empty);
                     break;
+                case "capture_region_1":
+                    CaptureRegionRequested?.Invoke(this, 1);
+                    break;
+                case "capture_region_2":
+                    CaptureRegionRequested?.Invoke(this, 2);
+                    break;
+                case "capture_region_3":
+                    CaptureRegionRequested?.Invoke(this, 3);
+                    break;
+                case "capture_region_4":
+                    CaptureRegionRequested?.Invoke(this, 4);
+                    break;
+                case "capture_region_5":
+                    CaptureRegionRequested?.Invoke(this, 5);
+                    break;
+                case "capture_region_reset":
+                    CaptureRegionResetRequested?.Invoke(this, EventArgs.Empty);
+                    break;
             }
         }
         
@@ -335,6 +355,9 @@ namespace UGTLive
                     }
                     
                     Console.WriteLine($"Loaded {bindingCount} hotkey bindings from {HOTKEYS_FILE}");
+                    
+                    // Backfill any new actions that were added since the file was last saved
+                    BackfillMissingDefaults();
                 }
                 catch (Exception ex)
                 {
@@ -384,82 +407,103 @@ namespace UGTLive
             _actionBindings.Clear();
             _globalHotkeysEnabled = true;
             
-            // Start/Stop - Shift+S
-            var startStop = new HotkeyEntry("start_stop", "Start/Stop Live OCR");
-            startStop.KeyboardKey = Key.S;
-            startStop.UseShift = true;
-            _actionBindings["start_stop"] = new List<HotkeyEntry> { startStop };
-            
-            // Toggle Monitor - Shift+M
-            var toggleMonitor = new HotkeyEntry("toggle_monitor", "Toggle Monitor Window");
-            toggleMonitor.KeyboardKey = Key.M;
-            toggleMonitor.UseShift = true;
-            _actionBindings["toggle_monitor"] = new List<HotkeyEntry> { toggleMonitor };
-            
-            // Toggle ChatBox - Shift+C
-            var toggleChatBox = new HotkeyEntry("toggle_chatbox", "Toggle Transcript");
-            toggleChatBox.KeyboardKey = Key.C;
-            toggleChatBox.UseShift = true;
-            _actionBindings["toggle_chatbox"] = new List<HotkeyEntry> { toggleChatBox };
-            
-            // Toggle Settings - Shift+E (changed from P since P is now Passthrough)
-            var toggleSettings = new HotkeyEntry("toggle_settings", "Toggle Settings");
-            toggleSettings.KeyboardKey = Key.E;
-            toggleSettings.UseShift = true;
-            _actionBindings["toggle_settings"] = new List<HotkeyEntry> { toggleSettings };
-            
-            // Toggle Log - Shift+L
-            var toggleLog = new HotkeyEntry("toggle_log", "Toggle Log");
-            toggleLog.KeyboardKey = Key.L;
-            toggleLog.UseShift = true;
-            _actionBindings["toggle_log"] = new List<HotkeyEntry> { toggleLog };
-            
-            // Toggle Main Window - Shift+H
-            var toggleMainWindow = new HotkeyEntry("toggle_main_window", "Toggle Main Window");
-            toggleMainWindow.KeyboardKey = Key.H;
-            toggleMainWindow.UseShift = true;
-            _actionBindings["toggle_main_window"] = new List<HotkeyEntry> { toggleMainWindow };
-            
-            // Clear Overlays - Shift+X
-            var clearOverlays = new HotkeyEntry("clear_overlays", "Clear Overlays");
-            clearOverlays.KeyboardKey = Key.X;
-            clearOverlays.UseShift = true;
-            _actionBindings["clear_overlays"] = new List<HotkeyEntry> { clearOverlays };
-            
-            // Toggle Passthrough - Shift+P
-            var togglePassthrough = new HotkeyEntry("toggle_passthrough", "Toggle Passthrough");
-            togglePassthrough.KeyboardKey = Key.P;
-            togglePassthrough.UseShift = true;
-            _actionBindings["toggle_passthrough"] = new List<HotkeyEntry> { togglePassthrough };
-            
-            // Next Overlay Mode - Tab
-            var toggleOverlayMode = new HotkeyEntry("toggle_overlay_mode", "Next Overlay Mode");
-            toggleOverlayMode.KeyboardKey = Key.Tab;
-            toggleOverlayMode.UseShift = false;
-            _actionBindings["toggle_overlay_mode"] = new List<HotkeyEntry> { toggleOverlayMode };
-            
-            // Previous Overlay Mode - No default key
-            var prevOverlayMode = new HotkeyEntry("prev_overlay_mode", "Previous Overlay Mode");
-            _actionBindings["prev_overlay_mode"] = new List<HotkeyEntry> { prevOverlayMode };
-            
-            // Toggle Listen - No default key
-            var toggleListen = new HotkeyEntry("toggle_listen", "Toggle Listen");
-            _actionBindings["toggle_listen"] = new List<HotkeyEntry> { toggleListen };
-            
-            // View in Browser - Shift+B
-            var viewInBrowser = new HotkeyEntry("view_in_browser", "View in Browser");
-            viewInBrowser.KeyboardKey = Key.B;
-            viewInBrowser.UseShift = true;
-            _actionBindings["view_in_browser"] = new List<HotkeyEntry> { viewInBrowser };
-            
-            // Snapshot - Shift+Z
-            var snapshot = new HotkeyEntry("snapshot", "Snapshot OCR");
-            snapshot.KeyboardKey = Key.Z;
-            snapshot.UseShift = true;
-            _actionBindings["snapshot"] = new List<HotkeyEntry> { snapshot };
+            _actionBindings = GetDefaultBindings();
             
             SaveHotkeys();
             Console.WriteLine("Created default hotkeys");
+        }
+        
+        // Add default bindings for any actions that don't yet exist in the loaded file.
+        // This handles the case where new hotkey actions are added to the code but the
+        // user already has an existing hotkeys.txt from a previous version.
+        private void BackfillMissingDefaults()
+        {
+            var defaults = GetDefaultBindings();
+            bool added = false;
+            
+            foreach (var kvp in defaults)
+            {
+                if (!_actionBindings.ContainsKey(kvp.Key))
+                {
+                    _actionBindings[kvp.Key] = kvp.Value;
+                    Console.WriteLine($"Backfilled missing hotkey: {kvp.Key}");
+                    added = true;
+                }
+            }
+            
+            if (added)
+            {
+                SaveHotkeys();
+            }
+        }
+        
+        // Returns the full set of default bindings (used by both CreateDefaultHotkeys and BackfillMissingDefaults)
+        private Dictionary<string, List<HotkeyEntry>> GetDefaultBindings()
+        {
+            var defaults = new Dictionary<string, List<HotkeyEntry>>();
+            
+            var startStop = new HotkeyEntry("start_stop", "Start/Stop Live OCR") { KeyboardKey = Key.S, UseShift = true };
+            defaults["start_stop"] = new List<HotkeyEntry> { startStop };
+            
+            var toggleMonitor = new HotkeyEntry("toggle_monitor", "Toggle Monitor Window") { KeyboardKey = Key.M, UseShift = true };
+            defaults["toggle_monitor"] = new List<HotkeyEntry> { toggleMonitor };
+            
+            var toggleChatBox = new HotkeyEntry("toggle_chatbox", "Toggle Transcript") { KeyboardKey = Key.C, UseShift = true };
+            defaults["toggle_chatbox"] = new List<HotkeyEntry> { toggleChatBox };
+            
+            var toggleSettings = new HotkeyEntry("toggle_settings", "Toggle Settings") { KeyboardKey = Key.E, UseShift = true };
+            defaults["toggle_settings"] = new List<HotkeyEntry> { toggleSettings };
+            
+            var toggleLog = new HotkeyEntry("toggle_log", "Toggle Log") { KeyboardKey = Key.L, UseShift = true };
+            defaults["toggle_log"] = new List<HotkeyEntry> { toggleLog };
+            
+            var toggleMainWindow = new HotkeyEntry("toggle_main_window", "Toggle Main Window") { KeyboardKey = Key.H, UseShift = true };
+            defaults["toggle_main_window"] = new List<HotkeyEntry> { toggleMainWindow };
+            
+            var clearOverlays = new HotkeyEntry("clear_overlays", "Clear Overlays") { KeyboardKey = Key.X, UseShift = true };
+            defaults["clear_overlays"] = new List<HotkeyEntry> { clearOverlays };
+            
+            var togglePassthrough = new HotkeyEntry("toggle_passthrough", "Toggle Passthrough") { KeyboardKey = Key.P, UseShift = true };
+            defaults["toggle_passthrough"] = new List<HotkeyEntry> { togglePassthrough };
+            
+            var toggleOverlayMode = new HotkeyEntry("toggle_overlay_mode", "Next Overlay Mode") { KeyboardKey = Key.Tab };
+            defaults["toggle_overlay_mode"] = new List<HotkeyEntry> { toggleOverlayMode };
+            
+            var prevOverlayMode = new HotkeyEntry("prev_overlay_mode", "Previous Overlay Mode");
+            defaults["prev_overlay_mode"] = new List<HotkeyEntry> { prevOverlayMode };
+            
+            var toggleListen = new HotkeyEntry("toggle_listen", "Toggle Listen");
+            defaults["toggle_listen"] = new List<HotkeyEntry> { toggleListen };
+            
+            var viewInBrowser = new HotkeyEntry("view_in_browser", "View in Browser") { KeyboardKey = Key.B, UseShift = true };
+            defaults["view_in_browser"] = new List<HotkeyEntry> { viewInBrowser };
+            
+            var snapshot = new HotkeyEntry("snapshot", "Snapshot OCR") { KeyboardKey = Key.Z, UseShift = true };
+            defaults["snapshot"] = new List<HotkeyEntry> { snapshot };
+            
+            var region1 = new HotkeyEntry("capture_region_1", "Capture Region 1") { KeyboardKey = Key.D1, UseShift = true };
+            defaults["capture_region_1"] = new List<HotkeyEntry> { region1 };
+            
+            var region2 = new HotkeyEntry("capture_region_2", "Capture Region 2") { KeyboardKey = Key.D2, UseShift = true };
+            defaults["capture_region_2"] = new List<HotkeyEntry> { region2 };
+            
+            var region3 = new HotkeyEntry("capture_region_3", "Capture Region 3") { KeyboardKey = Key.D3, UseShift = true };
+            defaults["capture_region_3"] = new List<HotkeyEntry> { region3 };
+            
+            var region4 = new HotkeyEntry("capture_region_4", "Capture Region 4") { KeyboardKey = Key.D4, UseShift = true };
+            defaults["capture_region_4"] = new List<HotkeyEntry> { region4 };
+            
+            var region5 = new HotkeyEntry("capture_region_5", "Capture Region 5") { KeyboardKey = Key.D5, UseShift = true };
+            defaults["capture_region_5"] = new List<HotkeyEntry> { region5 };
+            
+            var regionReset = new HotkeyEntry("capture_region_reset", "Reset Capture Region") { KeyboardKey = Key.D0, UseShift = true };
+            defaults["capture_region_reset"] = new List<HotkeyEntry> { regionReset };
+            
+            // Play All Audio - No default key
+            var playAllAudio = new HotkeyEntry("play_all_audio", "Play All Audio");
+            defaults["play_all_audio"] = new List<HotkeyEntry> { playAllAudio };
+            
+            return defaults;
         }
     }
 }

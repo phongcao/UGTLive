@@ -61,6 +61,7 @@ namespace UGTLive
         private const int GENERIC_LLM_OCR_FRAME_HASH_DIFFERENCE_THRESHOLD = 1;
         private const int GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_DIMENSION = 768;
         private const int GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000;
+        private const int GENERIC_LLM_OCR_DEFAULT_MIN_IMAGE_SHORT_EDGE = 200;
 
         // Track the current capture position
         private int _currentCaptureX;
@@ -452,10 +453,14 @@ namespace UGTLive
             int maxTotalPixels = GetGenericLlmOcrNonNegativeIntConfig(
                 "generic_llm_ocr_max_total_pixels",
                 GENERIC_LLM_OCR_DEFAULT_MAX_IMAGE_TOTAL_PIXELS);
+            int minShortEdge = GetGenericLlmOcrNonNegativeIntConfig(
+                "generic_llm_ocr_min_short_edge",
+                GENERIC_LLM_OCR_DEFAULT_MIN_IMAGE_SHORT_EDGE);
 
             int originalWidth = sourceBitmap.Width;
             int originalHeight = sourceBitmap.Height;
             int longestEdge = Math.Max(originalWidth, originalHeight);
+            int shortestEdge = Math.Min(originalWidth, originalHeight);
             long totalPixels = (long)originalWidth * originalHeight;
             double scaleFactor = 1.0;
 
@@ -467,6 +472,14 @@ namespace UGTLive
             if (maxTotalPixels > 0 && totalPixels > maxTotalPixels)
             {
                 scaleFactor = Math.Min(scaleFactor, Math.Sqrt(maxTotalPixels / (double)totalPixels));
+            }
+
+            // Ensure the short edge doesn't shrink below the minimum readable size
+            if (minShortEdge > 0 && shortestEdge > minShortEdge)
+            {
+                double minScale = minShortEdge / (double)shortestEdge;
+                if (scaleFactor < minScale)
+                    scaleFactor = minScale;
             }
 
             if (scaleFactor >= 0.9995)

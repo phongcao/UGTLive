@@ -73,6 +73,7 @@ DEFAULT_FUZZY_MATCH = True
 DEFAULT_FUZZY_THRESHOLD = 0.85
 DEFAULT_MAX_IMAGE_DIMENSION = 768
 DEFAULT_MAX_IMAGE_TOTAL_PIXELS = 450000
+DEFAULT_MIN_IMAGE_SHORT_EDGE = 200
 DEFAULT_TRANSLATION_CACHE_MAX_SIZE = 10000
 DEFAULT_TRANSLATION_CACHE_SAVE_INTERVAL = 300  # seconds
 TRANSLATION_CACHE_PATH = Path(__file__).parent / "translation_cache.json"
@@ -142,6 +143,9 @@ PROMPT_OCR_TRANSLATE = (
 
 PROMPT_TRANSLATE_TEXT = (
     "You are a translation engine. Translate each numbered line below from {source_lang} to {target_lang}.\n"
+    "CRITICAL: Translate EVERY word and character. The output must contain ONLY {target_lang} text.\n"
+    "Do NOT leave any {source_lang} characters untranslated in the output.\n"
+    "If a word is a name, transliterate it into {target_lang}. If a word is a title or role, translate its meaning.\n"
     "Output EXACTLY the same number of lines, each prefixed with the SAME number.\n"
     "Do NOT add, remove, or reorder lines. Do NOT add explanations.\n"
     "Format:\n"
@@ -755,8 +759,15 @@ def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) ->
         DEFAULT_MAX_IMAGE_TOTAL_PIXELS,
     )
 
+    min_short_edge = get_non_negative_int(
+        runtime_config,
+        "generic_llm_ocr_min_short_edge",
+        DEFAULT_MIN_IMAGE_SHORT_EDGE,
+    )
+
     original_width, original_height = image.size
     longest_edge = max(original_width, original_height)
+    shortest_edge = min(original_width, original_height)
     total_pixels = original_width * original_height
     scale_factor = 1.0
 
@@ -765,6 +776,12 @@ def prepare_image_for_llm(image: Image.Image, runtime_config: Dict[str, str]) ->
 
     if max_total_pixels > 0 and total_pixels > max_total_pixels:
         scale_factor = min(scale_factor, (max_total_pixels / float(total_pixels)) ** 0.5)
+
+    # Ensure the short edge doesn't shrink below the minimum readable size
+    if min_short_edge > 0 and shortest_edge >= min_short_edge:
+        min_scale = min_short_edge / float(shortest_edge)
+        if scale_factor < min_scale:
+            scale_factor = min_scale
 
     if scale_factor < 0.9995:
         resized_width = max(1, int(round(original_width * scale_factor)))

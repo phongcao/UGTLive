@@ -8,7 +8,9 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
+using WpfColor = System.Windows.Media.Color;
 
 namespace UGTLive
 {
@@ -224,6 +226,93 @@ namespace UGTLive
         private void ResetBorderButton_Click(object sender, RoutedEventArgs e)
         {
             MainWindow.Instance?.HandleResetBorderButton();
+        }
+
+        // --- Capture Region Preset Buttons ---
+        
+        private int _selectedRegionSlot = 1; // Which slot Save/Del will target (1-5)
+        
+        private void RegionButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.Button btn && btn.Tag is string tagStr && int.TryParse(tagStr, out int index))
+            {
+                _selectedRegionSlot = index;
+                
+                // If this region has a saved position, switch to it
+                if (ConfigManager.Instance.HasCaptureRegion(index))
+                {
+                    MainWindow.Instance?.SwitchToCaptureRegion(index);
+                }
+                else
+                {
+                    // Just select the slot for saving
+                    UpdateCaptureRegionButtons(MainWindow.Instance?.GetActiveCaptureRegionIndex() ?? 0);
+                }
+            }
+        }
+        
+        private void RegionSaveButton_Click(object sender, RoutedEventArgs e)
+        {
+            MainWindow.Instance?.SaveCaptureRegion(_selectedRegionSlot);
+        }
+        
+        private void RegionDeleteButton_Click(object sender, RoutedEventArgs e)
+        {
+            MainWindow.Instance?.DeleteCaptureRegion(_selectedRegionSlot);
+        }
+        
+        private void RegionResetButton_Click(object sender, RoutedEventArgs e)
+        {
+            MainWindow.Instance?.ResetCaptureRegionToDefault();
+        }
+        
+        // Update the visual state of region buttons
+        public void UpdateCaptureRegionButtons(int activeIndex)
+        {
+            var buttons = new[] { regionBtn1, regionBtn2, regionBtn3, regionBtn4, regionBtn5 };
+            
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                int regionIndex = i + 1;
+                bool hasSaved = ConfigManager.Instance.HasCaptureRegion(regionIndex);
+                bool isActive = (regionIndex == activeIndex);
+                bool isSelected = (regionIndex == _selectedRegionSlot);
+                
+                if (isActive)
+                {
+                    // Active region: green background
+                    buttons[i].Background = new SolidColorBrush(WpfColor.FromRgb(46, 160, 67));
+                    buttons[i].BorderBrush = new SolidColorBrush(WpfColor.FromRgb(80, 220, 100));
+                }
+                else if (hasSaved)
+                {
+                    // Saved but not active: white border to indicate it has data
+                    buttons[i].Background = new SolidColorBrush(WpfColor.FromRgb(70, 70, 90));
+                    buttons[i].BorderBrush = new SolidColorBrush(Colors.White);
+                }
+                else
+                {
+                    // Empty slot: dim appearance
+                    buttons[i].Background = new SolidColorBrush(WpfColor.FromRgb(95, 95, 95));
+                    buttons[i].BorderBrush = new SolidColorBrush(WpfColor.FromRgb(128, 128, 128));
+                }
+                
+                // Add underline to selected slot (the one Save/Del will target)
+                if (isSelected && !isActive)
+                {
+                    buttons[i].BorderBrush = new SolidColorBrush(WpfColor.FromRgb(255, 200, 50));
+                }
+            }
+            
+            // Update the reset/0 button
+            if (activeIndex == 0)
+            {
+                regionResetButton.Background = new SolidColorBrush(WpfColor.FromRgb(46, 160, 67));
+            }
+            else
+            {
+                regionResetButton.Background = new SolidColorBrush(WpfColor.FromRgb(95, 95, 95));
+            }
         }
 
         private void MinimizeAppButton_Click(object sender, RoutedEventArgs e)
