@@ -312,111 +312,149 @@ namespace UGTLive
 
         private async Task<bool> StartWavStreamingPlaybackAsync(HttpResponseMessage response, Stopwatch? operationStopwatch, bool waitForCompletion, CancellationToken cancellationToken)
         {
-            CancellationTokenSource linkedCts;
+            TaskCompletionSource<bool> playbackStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> playbackCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int startupBufferBytes = DefaultStreamingSampleRate * 2 * StreamingStartupBufferMilliseconds / 1000;
+            CancellationTokenSource playbackCancellation;
+
             lock (_streamPlaybackLock)
             {
                 _activeStreamPlaybackCancellation?.Cancel();
                 _activeStreamPlaybackCancellation = new CancellationTokenSource();
-                linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_activeStreamPlaybackCancellation.Token, cancellationToken);
+                playbackCancellation = CancellationTokenSource.CreateLinkedTokenSource(_activeStreamPlaybackCancellation.Token, cancellationToken);
             }
 
-            Stream? networkStream = null;
-            WaveOutEvent? player = null;
-            BufferedWaveProvider? bufferedProvider = null;
-
-            try
+            _ = Task.Run(async () =>
             {
-                networkStream = await response.Content.ReadAsStreamAsync();
+                BufferedWaveProvider? bufferedProvider = null;
+                WaveOutEvent? wavePlayer = null;
+                Stream? audioStream = null;
+                long totalBytesRead = 0;
+                bool hasStartedPlayback = false;
 
-                lock (_streamPlaybackLock)
+                try
                 {
-                    _activeStreamPlaybackStream = networkStream;
-                }
+                    audioStream = await response.Content.ReadAsStreamAsync();
 
-                using var memoryStream = new MemoryStream();
-                byte[] buffer = new byte[StreamingReadBufferSize];
-                int totalRead = 0;
-                bool headerBuffered = false;
-
-                while (totalRead < 44 + (DefaultStreamingSampleRate * 2))
-                {
-                    if (linkedCts.Token.IsCancellationRequested)
+                    lock (_streamPlaybackLock)
                     {
-                        return false;
+                        _activeStreamPlaybackStream = audioStream;
                     }
 
-                    int bytesRead = await networkStream.ReadAsync(buffer, 0, buffer.Length, linkedCts.Token);
-                    if (bytesRead == 0)
+                    // Read and skip the 44-byte WAV header
+                    byte[] wavHeader = new byte[44];
+                    int headerRead = 0;
+                    while (headerRead < 44)
                     {
-                        break;
+                        int n = await audioStream.ReadAsync(wavHeader, headerRead, 44 - headerRead, playbackCancellation.Token);
+                        if (n == 0) break;
+                        headerRead += n;
                     }
 
-                    memoryStream.Write(buffer, 0, bytesRead);
-                    totalRead += bytesRead;
-
-                    if (!headerBuffered && totalRead >= 44)
+                    if (headerRead < 44)
                     {
-                        headerBuffered = true;
-                    }
-                }
-
-                while (true)
-                {
-                    if (linkedCts.Token.IsCancellationRequested)
-                    {
-                        break;
+                        Debug.WriteLine("VieNeu-GGUF-TTS: Stream too short, no valid WAV header");
+                        playbackStarted.TrySetResult(false);
+                        return;
                     }
 
-                    int bytesRead = await networkStream.ReadAsync(buffer, 0, buffer.Length, linkedCts.Token);
-                    if (bytesRead == 0)
+                    bufferedProvider = new BufferedWaveProvider(new WaveFormat(DefaultStreamingSampleRate, 16, 1))
                     {
-                        break;
+                        BufferDuration = TimeSpan.FromSeconds(30),
+                        DiscardOnBufferOverflow = true,
+                        ReadFully = true
+                    };
+
+                    wavePlayer = new WaveOutEvent();
+                    wavePlayer.Init(bufferedProvider);
+
+                    lock (_streamPlaybackLock)
+                    {
+                        _activeStreamPlaybackPlayer = wavePlayer;
                     }
 
-                    memoryStream.Write(buffer, 0, bytesRead);
-                }
+                    byte[] readBuffer = new byte[StreamingReadBufferSize];
 
-                if (memoryStream.Length < 44)
-                {
-                    Debug.WriteLine("VieNeu-GGUF-TTS: Stream too short, no valid WAV data");
-                    return false;
-                }
+                    while (true)
+                    {
+                        int bytesRead = await audioStream.ReadAsync(readBuffer, 0, readBuffer.Length, playbackCancellation.Token);
+                        if (bytesRead <= 0)
+                        {
+                            Debug.WriteLine($"VieNeu-GGUF-TTS: Stream EOF, total_bytes={totalBytesRead}, playback_started={hasStartedPlayback}");
+                            break;
+                        }
 
-                string tempDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "temp", "cache");
-                Directory.CreateDirectory(tempDir);
-                string tempFile = Path.Combine(tempDir, $"tts_vieneugguf_stream_{DateTime.Now.Ticks}.wav");
+                        totalBytesRead += bytesRead;
+                        bufferedProvider.AddSamples(readBuffer, 0, bytesRead);
 
-                memoryStream.Position = 0;
-                using (var fileStream = File.Create(tempFile))
-                {
-                    await memoryStream.CopyToAsync(fileStream);
-                }
+                        if (!hasStartedPlayback && bufferedProvider.BufferedBytes >= startupBufferBytes)
+                        {
+                            Debug.WriteLine($"VieNeu-GGUF-TTS: Starting streaming playback, buffered={bufferedProvider.BufferedBytes} bytes, elapsed={operationStopwatch?.Elapsed.TotalSeconds:F2}s");
+                            wavePlayer.Play();
+                            hasStartedPlayback = true;
+                            playbackStarted.TrySetResult(true);
+                        }
+                    }
 
-                if (waitForCompletion)
-                {
-                    return await PlayAudioFileAndWaitAsync(tempFile, linkedCts.Token);
+                    // If we never hit the buffer threshold, start playback with whatever we have
+                    if (!hasStartedPlayback)
+                    {
+                        if (bufferedProvider.BufferedBytes == 0)
+                        {
+                            Debug.WriteLine("VieNeu-GGUF-TTS: Stream ended without playable audio");
+                            playbackStarted.TrySetResult(false);
+                            return;
+                        }
+
+                        Debug.WriteLine($"VieNeu-GGUF-TTS: Starting playback at stream end, buffered={bufferedProvider.BufferedBytes} bytes");
+                        wavePlayer.Play();
+                        hasStartedPlayback = true;
+                        playbackStarted.TrySetResult(true);
+                    }
+
+                    // Wait for buffered audio to finish playing
+                    while (bufferedProvider.BufferedBytes > 0)
+                    {
+                        await Task.Delay(50);
+                    }
+
+                    wavePlayer.Stop();
+                    Debug.WriteLine($"VieNeu-GGUF-TTS: Streaming playback completed, total_bytes={totalBytesRead}, elapsed={operationStopwatch?.Elapsed.TotalSeconds:F2}s");
+                    playbackCompleted.TrySetResult(true);
                 }
-                else
+                catch (OperationCanceledException)
                 {
-                    PlayAudioFile(tempFile);
-                    return true;
+                    Debug.WriteLine("VieNeu-GGUF-TTS: Streaming playback cancelled");
+                    if (!hasStartedPlayback) playbackStarted.TrySetResult(false);
+                    playbackCompleted.TrySetResult(false);
                 }
-            }
-            catch (OperationCanceledException)
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"VieNeu-GGUF-TTS: Streaming playback error: {ex.Message}");
+                    if (!hasStartedPlayback) playbackStarted.TrySetResult(false);
+                    playbackCompleted.TrySetResult(false);
+                }
+                finally
+                {
+                    lock (_streamPlaybackLock)
+                    {
+                        _activeStreamPlaybackPlayer = null;
+                        _activeStreamPlaybackStream = null;
+                    }
+                    wavePlayer?.Dispose();
+                    audioStream?.Dispose();
+                    response.Dispose();
+                    playbackCancellation.Dispose();
+                }
+            });
+
+            bool started = await playbackStarted.Task;
+            if (!waitForCompletion || !started)
             {
-                Debug.WriteLine("VieNeu-GGUF-TTS: Streaming playback cancelled");
-                return false;
+                return started;
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"VieNeu-GGUF-TTS: Streaming playback error: {ex.Message}");
-                return false;
-            }
-            finally
-            {
-                response.Dispose();
-                linkedCts.Dispose();
-            }
+
+            return await playbackCompleted.Task;
         }
 
         private void PlayAudioFile(string filePath)

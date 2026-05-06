@@ -130,7 +130,7 @@ def benchmark_ocr(
     endpoint = build_endpoint(api_base)
 
     # Resize image the same way the server does
-    llm_image, llm_image_bytes = prepare_image_for_llm(image, config)
+    llm_image, llm_image_bytes, _pad_left, _pad_top, _cw, _ch = prepare_image_for_llm(image, config)
     prompt = build_prompt(mode, llm_image.width, llm_image.height, source_lang, target_lang, ignore_menu)
 
     image_data_url = f"data:image/png;base64,{base64.b64encode(llm_image_bytes).decode('utf-8')}"
@@ -227,9 +227,14 @@ def benchmark_translate(
         print("  SKIP: No text objects to translate.")
         return [], 0.0
 
-    api_base = config.get("generic_llm_ocr_api_base", "http://127.0.0.1:1234")
-    api_key = config.get("generic_llm_ocr_api_key", "")
-    model = config.get("generic_llm_ocr_model", "qwen2.5-vl-7b-instruct")
+    # Use translation-specific endpoint/model if configured, otherwise fall back to main OCR settings
+    translate_api_base = (config.get("generic_llm_ocr_translate_api_base", "") or "").strip()
+    translate_api_key = (config.get("generic_llm_ocr_translate_api_key", "") or "").strip()
+    translate_model = (config.get("generic_llm_ocr_translate_model", "") or "").strip()
+
+    api_base = translate_api_base or config.get("generic_llm_ocr_api_base", "http://127.0.0.1:1234")
+    api_key = translate_api_key or config.get("generic_llm_ocr_api_key", "")
+    model = translate_model or config.get("generic_llm_ocr_model", "qwen2.5-vl-7b-instruct")
 
     endpoint = api_base.rstrip("/")
     if not endpoint.endswith("/chat/completions"):
@@ -602,7 +607,7 @@ def main():
         elif s in ("full_combined", "fullcombined"):
             stages = {"ocr_translate", "dialog_tts", "tts"}
             break
-        elif s == "ocr+translate":
+        elif s in ("ocr+translate", "ocr_then_translate", "ocrthentranslate"):
             stages.update({"ocr", "translate"})
         elif s in ("ocr_translate", "ocrtranslate"):
             stages.add("ocr_translate")

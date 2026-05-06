@@ -18,9 +18,9 @@ import uvicorn
 import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 # Add shared folder to path
 shared_dir = Path(__file__).parent.parent / "shared"
@@ -542,6 +542,233 @@ def decode_speech_tokens(speech_ids: list[int], voice_embedding: Optional[np.nda
         return audio
 
 
+# ---------------------------------------------------------------------------
+# Streaming audio generation
+# ---------------------------------------------------------------------------
+
+# Streaming constants (matching SDK: standard overrides in __init__)
+STREAMING_HOP_LENGTH = 480          # samples per speech token frame
+STREAMING_FRAMES_PER_CHUNK = 25     # tokens per decode chunk
+STREAMING_LOOKFORWARD = 10          # extra tokens to decode ahead
+STREAMING_LOOKBACK = 100            # context tokens before current chunk
+STREAMING_OVERLAP_FRAMES = 1        # overlap frames for crossfade
+STREAMING_STRIDE_SAMPLES = STREAMING_FRAMES_PER_CHUNK * STREAMING_HOP_LENGTH  # 12000 samples per chunk
+SAMPLE_RATE = 24000
+
+
+def _linear_overlap_add(frames: List[np.ndarray], stride: int) -> np.ndarray:
+    """Perform linear overlap-add on a list of audio frames."""
+    if not frames:
+        return np.array([], dtype=np.float32)
+
+    dtype = frames[0].dtype
+    total_size = 0
+    for i, frame in enumerate(frames):
+        frame_end = stride * i + frame.shape[-1]
+        total_size = max(total_size, frame_end)
+
+    out = np.zeros(total_size, dtype=dtype)
+    sum_weight = np.zeros(total_size, dtype=dtype)
+
+    offset = 0
+    for frame in frames:
+        frame_length = frame.shape[-1]
+        t = np.linspace(0, 1, frame_length + 2, dtype=dtype)[1:-1]
+        weight = np.abs(0.5 - (t - 0.5))
+        out[offset:offset + frame_length] += weight * frame
+        sum_weight[offset:offset + frame_length] += weight
+        offset += stride
+
+    safe_sum_weight = np.where(sum_weight > 0, sum_weight, 1.0)
+    return out / safe_sum_weight
+
+
+def _make_wav_header(sample_rate: int = 24000, bits_per_sample: int = 16, num_channels: int = 1, data_size: int = 0xFFFFFFFF) -> bytes:
+    """Create a WAV header. Uses max data_size for streaming (updated later or left as-is)."""
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    # For streaming, cap chunk sizes to max uint32 so client doesn't stop early
+    riff_size = min(data_size + 36, 0xFFFFFFFF)
+    header = io.BytesIO()
+    header.write(b'RIFF')
+    header.write(riff_size.to_bytes(4, 'little'))  # file size - 8
+    header.write(b'WAVE')
+    header.write(b'fmt ')
+    header.write((16).to_bytes(4, 'little'))  # fmt chunk size
+    header.write((1).to_bytes(2, 'little'))   # PCM format
+    header.write(num_channels.to_bytes(2, 'little'))
+    header.write(sample_rate.to_bytes(4, 'little'))
+    header.write(byte_rate.to_bytes(4, 'little'))
+    header.write(block_align.to_bytes(2, 'little'))
+    header.write(bits_per_sample.to_bytes(2, 'little'))
+    header.write(b'data')
+    header.write(data_size.to_bytes(4, 'little'))
+    return header.getvalue()
+
+
+def _decode_chunk(speech_ids: List[int]) -> np.ndarray:
+    """Decode a list of speech IDs to audio using the loaded codec."""
+    if MODEL_TYPE == "standard":
+        codes = np.array(speech_ids, dtype=np.int32)[np.newaxis, np.newaxis, :]
+        recon = VIENEU_CODEC.decode_code(codes)
+        return recon[0, 0, :]
+    else:
+        decode_str = "".join(f"<|speech_{tid}|>" for tid in speech_ids)
+        return TURBO_MODEL._decode(decode_str, None)
+
+
+async def _stream_speech_generation(prompt: str, ref_codes: List[int], voice_embedding: Optional[np.ndarray] = None, speed: float = 1.0):
+    """Generator that streams WAV audio chunks as speech tokens arrive from LM Studio.
+
+    Yields bytes: first the WAV header, then PCM16 audio chunks.
+    """
+    import re
+    import json as json_mod
+    from vieneu.utils import extract_speech_ids
+
+    RE_SPEECH_TOKEN = re.compile(r"<\|speech_(\d+)\|>")
+
+    completions_url = f"{LM_STUDIO_URL}/v1/completions"
+
+    if MODEL_TYPE == "standard":
+        payload = {
+            "prompt": prompt,
+            "max_tokens": 2048,
+            "temperature": 1.0,
+            "top_k": 50,
+            "stop": ["<|SPEECH_GENERATION_END|>"],
+            "stream": True,
+        }
+    else:
+        payload = {
+            "prompt": prompt,
+            "max_tokens": 2048,
+            "temperature": 0.4,
+            "top_k": 50,
+            "top_p": 0.95,
+            "min_p": 0.05,
+            "repeat_penalty": 1.15,
+            "stop": ["<|SPEECH_GENERATION_END|>"],
+            "stream": True,
+        }
+
+    if LM_STUDIO_MODEL:
+        payload["model"] = LM_STUDIO_MODEL
+
+    # Yield WAV header first (with max data_size for streaming)
+    yield _make_wav_header(SAMPLE_RATE)
+
+    # Token state for overlap-add streaming
+    token_cache: List[int] = list(ref_codes)  # Start with reference codes for context
+    n_decoded_tokens: int = len(ref_codes)
+    n_decoded_samples: int = 0
+    audio_cache: List[np.ndarray] = []
+    text_buffer = ""  # Buffer for incomplete tokens
+
+    start_time = time.time()
+    total_generated = 0
+
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream("POST", completions_url, json=payload) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+
+                    try:
+                        chunk_data = json_mod.loads(data_str)
+                        token_text = chunk_data["choices"][0].get("text", "")
+                    except (ValueError, KeyError, IndexError):
+                        continue
+
+                    if not token_text:
+                        continue
+
+                    # Accumulate text and extract complete speech tokens
+                    text_buffer += token_text
+                    matches = list(RE_SPEECH_TOKEN.finditer(text_buffer))
+
+                    if not matches:
+                        continue
+
+                    # Extract all complete token IDs
+                    for m in matches:
+                        token_id = int(m.group(1))
+                        token_cache.append(token_id)
+                        total_generated += 1
+
+                    # Keep any incomplete text after the last match
+                    last_end = matches[-1].end()
+                    text_buffer = text_buffer[last_end:]
+
+                    # Check if we have enough tokens for a chunk
+                    pending = len(token_cache) - n_decoded_tokens
+                    if pending >= STREAMING_FRAMES_PER_CHUNK + STREAMING_LOOKFORWARD:
+                        # Decode a chunk with context
+                        tokens_start = max(n_decoded_tokens - STREAMING_LOOKBACK - STREAMING_OVERLAP_FRAMES, 0)
+                        tokens_end = n_decoded_tokens + STREAMING_FRAMES_PER_CHUNK + STREAMING_LOOKFORWARD + STREAMING_OVERLAP_FRAMES
+                        tokens_end = min(tokens_end, len(token_cache))
+
+                        sample_start = (n_decoded_tokens - tokens_start) * STREAMING_HOP_LENGTH
+                        sample_end = sample_start + (STREAMING_FRAMES_PER_CHUNK + 2 * STREAMING_OVERLAP_FRAMES) * STREAMING_HOP_LENGTH
+
+                        curr_ids = token_cache[tokens_start:tokens_end]
+                        recon = _decode_chunk(curr_ids)
+
+                        # Clip to expected range
+                        recon = recon[sample_start:sample_end]
+                        audio_cache.append(recon)
+
+                        # Overlap-add and yield new samples
+                        processed = _linear_overlap_add(audio_cache, stride=STREAMING_STRIDE_SAMPLES)
+                        new_samples_end = len(audio_cache) * STREAMING_STRIDE_SAMPLES
+                        new_audio = processed[n_decoded_samples:new_samples_end]
+                        n_decoded_samples = new_samples_end
+                        n_decoded_tokens += STREAMING_FRAMES_PER_CHUNK
+
+                        # Apply speed stretch if needed
+                        if speed != 1.0:
+                            new_audio = time_stretch_audio(new_audio, speed)
+
+                        # Convert to PCM16 and yield
+                        pcm_bytes = float32_to_pcm16(new_audio)
+                        yield pcm_bytes
+
+        # Flush remaining tokens
+        remaining = len(token_cache) - n_decoded_tokens
+        if remaining > 0:
+            tokens_start = max(len(token_cache) - (STREAMING_LOOKBACK + STREAMING_OVERLAP_FRAMES + remaining), 0)
+            sample_start = (len(token_cache) - tokens_start - remaining - STREAMING_OVERLAP_FRAMES) * STREAMING_HOP_LENGTH
+
+            curr_ids = token_cache[tokens_start:]
+            recon = _decode_chunk(curr_ids)
+            recon = recon[sample_start:]
+            audio_cache.append(recon)
+
+            processed = _linear_overlap_add(audio_cache, stride=STREAMING_STRIDE_SAMPLES)
+            final_audio = processed[n_decoded_samples:]
+
+            if speed != 1.0:
+                final_audio = time_stretch_audio(final_audio, speed)
+
+            pcm_bytes = float32_to_pcm16(final_audio)
+            yield pcm_bytes
+
+        elapsed = time.time() - start_time
+        LOGGER.info("Streaming TTS: %d tokens generated in %.2fs, yielded %d audio chunks",
+                    total_generated, elapsed, len(audio_cache))
+
+    except Exception as e:
+        LOGGER.error("Streaming TTS error: %s", e, exc_info=True)
+        # If we haven't yielded anything yet beyond the header, we can't send an error
+        # The connection will just close, which the client handles as a failure
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Pre-load VieNeu components and verify LM Studio connectivity at startup."""
@@ -648,20 +875,54 @@ async def get_voices():
 
 @app.get("/stream")
 async def stream_audio_get(text: str, voice_id: Optional[str] = None, speed: Optional[float] = 1.0):
-    """Streaming TTS endpoint (GET). Returns audio/wav."""
-    return await _synthesize_audio(text, voice_id, speed)
+    """Streaming TTS endpoint (GET). Returns audio/wav with chunked transfer."""
+    return await _synthesize_audio_streaming(text, voice_id, speed)
 
 
 @app.post("/stream")
 async def stream_audio_post(req: TTSRequest):
-    """Streaming TTS endpoint (POST). Returns audio/wav."""
-    return await _synthesize_audio(req.text, req.voice_id, req.speed)
+    """Streaming TTS endpoint (POST). Returns audio/wav with chunked transfer."""
+    return await _synthesize_audio_streaming(req.text, req.voice_id, req.speed)
 
 
 @app.post("/tts")
 async def tts_endpoint(req: TTSRequest):
     """Non-streaming TTS endpoint. Returns audio/wav."""
     return await _synthesize_audio(req.text, req.voice_id, req.speed)
+
+
+async def _synthesize_audio_streaming(text: str, voice_id: Optional[str] = None, speed: Optional[float] = 1.0):
+    """Synthesize audio with streaming: yields WAV chunks as tokens arrive from LM Studio."""
+    speed = speed if speed is not None else 1.0
+    speed = max(0.25, min(4.0, speed))
+
+    if MODEL_TYPE == "standard" and VIENEU_CODEC is None:
+        raise HTTPException(status_code=503, detail="Model components not loaded yet")
+    if MODEL_TYPE != "standard" and TURBO_MODEL is None:
+        raise HTTPException(status_code=503, detail="Model components not loaded yet")
+
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    text_preview = text[:60] + "..." if len(text) > 60 else text
+    LOGGER.info("Streaming TTS request: voice_id='%s', text='%s'", voice_id or '(none)', text_preview)
+
+    prompt, voice_embedding = build_prompt(text, voice_id)
+
+    # Get reference codes for streaming context (standard model only)
+    ref_codes: List[int] = []
+    if MODEL_TYPE == "standard":
+        voice_name = voice_id
+        if not voice_name or voice_name not in STANDARD_VOICE_PRESETS:
+            voice_name = DEFAULT_STANDARD_VOICE
+        if voice_name and voice_name in STANDARD_VOICE_PRESETS:
+            ref_codes = STANDARD_VOICE_PRESETS[voice_name]["codes"]
+
+    return StreamingResponse(
+        _stream_speech_generation(prompt, ref_codes, voice_embedding, speed),
+        media_type="audio/wav",
+        headers={"Content-Disposition": "attachment; filename=tts_stream.wav"},
+    )
 
 
 async def _synthesize_audio(text: str, voice_id: Optional[str] = None, speed: Optional[float] = 1.0):
