@@ -1,0 +1,40 @@
+Available Voices for VieNeu-GGUF-TTS
+======================================
+
+Set the voice in service_config.txt using the "default_voice" key.
+Example: default_voice|Binh|
+
+
+TURBO MODEL (model_type|turbo|, turbo_repo|pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF|)
+----------------------------------------------------------------------------------
+Voice ID                          | Gender | Region
+----------------------------------+--------+---------
+Bích Ngọc (Nữ - Miền Bắc)       | Female | Northern
+Phạm Tuyên (Nam - Miền Bắc)     | Male   | Northern
+Thục Đoan (Nữ - Miền Nam)       | Female | Southern
+Xuân Vĩnh (Nam - Miền Nam)      | Male   | Southern (default)
+
+
+STANDARD MODEL (model_type|standard|, standard_voice_repo|pnnbao-ump/VieNeu-TTS-v2|)
+--------------------------------------------------------------------------------------
+Voice ID  | Gender | Region   | Description
+----------+--------+----------+---------------------------
+Binh      | Male   | Northern | Bình (nam miền Bắc) (default)
+Tuyen     | Male   | Northern | Tuyên (nam miền Bắc)
+Vinh      | Male   | Southern | Vĩnh (nam miền Nam) (Fast/Clear)
+Doan      | Female | Southern | Đoan (nữ miền Nam) (Fast/Clear)
+Ly        | Female | Northern | Ly (nữ miền Bắc) (Faster)
+Sơn       | Male   | Southern | Sơn (nam miền Nam) - use "Son" in config
+Ngoc      | Female | Northern | Ngọc (nữ miền Bắc)
+
+
+STANDARD MODEL (model_type|standard|, standard_voice_repo|pnnbao-ump/VieNeu-TTS-0.3B|)
+----------------------------------------------------------------------------------------
+Voice ID  | Gender | Region   | Description
+----------+--------+----------+---------------------------
+Binh      | Male   | Northern | Bình (nam miền Bắc) (default)
+Tuyen     | Male   | Northern | Tuyên (nam miền Bắc)
+Vinh      | Male   | Southern | Vĩnh (nam miền Nam)
+Doan      | Female | Southern | Đoan (nữ miền Nam)
+Ly        | Female | Northern | Ly (nữ miền Bắc)
+Ngoc      | Female | Northern | Ngọc (nữ miền Bắc)

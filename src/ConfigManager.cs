@@ -2186,7 +2186,7 @@ Here is the input JSON:";
 
         public string GetVieNeuGgufTtsVoice()
         {
-            return GetValue(VIENEU_GGUF_TTS_VOICE, "Xuân Vĩnh (Nam - Miền Nam)");
+            return GetValue(VIENEU_GGUF_TTS_VOICE, "");
         }
 
         public string GetVieNeuGgufTtsLmStudioUrl()
