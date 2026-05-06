@@ -19,8 +19,18 @@ namespace UGTLive
         [DllImport("user32.dll")]
         private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
 
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private const uint SWP_NOMOVE = 0x0002;
@@ -99,6 +109,15 @@ namespace UGTLive
 
         private void ToolbarWindow_SourceInitialized(object? sender, EventArgs e)
         {
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+                exStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                SetWindowLong(hwnd, GWL_EXSTYLE, exStyle);
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+
             // WDA_EXCLUDEFROMCAPTURE (0x11) makes the toolbar completely invisible on some
             // systems/GPU drivers. Disabled until a reliable alternative is found.
             // SetExcludeFromCapture();

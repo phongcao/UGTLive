@@ -65,6 +65,8 @@ SERVICE_INSTALL_VERSION = get_config_value(SERVICE_CONFIG, "service_install_vers
 
 DEFAULT_API_BASE = "http://127.0.0.1:1234"
 DEFAULT_MODEL = "qwen2.5-vl-7b-instruct"
+DEFAULT_TRANSLATE_API_BASE = ""
+DEFAULT_TRANSLATE_MODEL = ""
 DEFAULT_MODE = "OCR + Translate"
 DEFAULT_TARGET_LANGUAGE = "en"
 DEFAULT_IGNORE_MENU_TEXT = False
@@ -1075,9 +1077,14 @@ def query_llm_translate_text(
     # Build numbered list of only uncached source texts
     uncached_objects = [text_objects[i] for i in uncached_indices]
 
-    api_base = runtime_config.get("generic_llm_ocr_api_base", DEFAULT_API_BASE)
-    api_key = runtime_config.get("generic_llm_ocr_api_key", "")
-    model = runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
+    # Use translation-specific endpoint/model if configured, otherwise fall back to main OCR settings
+    translate_api_base = (runtime_config.get("generic_llm_ocr_translate_api_base", "") or "").strip()
+    translate_api_key = (runtime_config.get("generic_llm_ocr_translate_api_key", "") or "").strip()
+    translate_model = (runtime_config.get("generic_llm_ocr_translate_model", "") or "").strip()
+
+    api_base = translate_api_base or runtime_config.get("generic_llm_ocr_api_base", DEFAULT_API_BASE)
+    api_key = translate_api_key or runtime_config.get("generic_llm_ocr_api_key", "")
+    model = translate_model or runtime_config.get("generic_llm_ocr_model", DEFAULT_MODEL)
     endpoint = build_endpoint(api_base)
 
     numbered_lines = []
